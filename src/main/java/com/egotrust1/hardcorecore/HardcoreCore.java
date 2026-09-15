@@ -58,17 +58,12 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     }
 
     @Override
-    public void onDisable() {
-        saveRecords();
-    }
+    public void onDisable() { saveRecords(); }
 
     private synchronized void saveRecords() {
         if (records == null || recordsFile == null) return;
-        try {
-            records.save(recordsFile);
-        } catch (IOException e) {
-            getLogger().severe("Could not save eliminations.yml: " + e.getMessage());
-        }
+        try { records.save(recordsFile); }
+        catch (IOException e) { getLogger().severe("Could not save eliminations.yml: " + e.getMessage()); }
     }
 
     private void enforceWorldRules() {
@@ -115,11 +110,8 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
 
         String banReason = getConfig().getString("messages.death-ban-reason", "Hardcore death");
         player.ban(banReason, (Instant) null, "HardcoreCore", false);
-
         String kick = getConfig().getString("messages.death-kick", "You died. You have been permanently eliminated from this Hardcore server.");
-        Bukkit.getScheduler().runTask(this, () -> {
-            if (player.isOnline()) player.kick(Component.text(kick));
-        });
+        Bukkit.getScheduler().runTask(this, () -> { if (player.isOnline()) player.kick(Component.text(kick)); });
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -134,7 +126,6 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         Player player = event.getPlayer();
         String path = "players." + player.getUniqueId();
         if (!records.getBoolean(path + ".revive-pending", false)) return;
-
         records.set(path + ".revive-pending", false);
         saveRecords();
         Bukkit.getScheduler().runTask(this, () -> {
@@ -161,10 +152,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         if (worldName == null) return Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getSpawnLocation();
         World world = Bukkit.getWorld(worldName);
         if (world == null) return Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getSpawnLocation();
-        double x = records.getDouble(path + ".respawn-x");
-        double y = records.getDouble(path + ".respawn-y");
-        double z = records.getDouble(path + ".respawn-z");
-        return new Location(world, x, y, z);
+        return new Location(world, records.getDouble(path + ".respawn-x"), records.getDouble(path + ".respawn-y"), records.getDouble(path + ".respawn-z"));
     }
 
     private boolean isEliminated(UUID uuid) {
@@ -175,12 +163,10 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         Player online = Bukkit.getPlayerExact(input);
         if (online != null) return online;
         ConfigurationSection players = records.getConfigurationSection("players");
-        if (players != null) {
-            for (String key : players.getKeys(false)) {
-                String stored = records.getString("players." + key + ".name");
-                if (stored != null && stored.equalsIgnoreCase(input)) {
-                    try { return Bukkit.getOfflinePlayer(UUID.fromString(key)); } catch (IllegalArgumentException ignored) { }
-                }
+        if (players != null) for (String key : players.getKeys(false)) {
+            String stored = records.getString("players." + key + ".name");
+            if (stored != null && stored.equalsIgnoreCase(input)) {
+                try { return Bukkit.getOfflinePlayer(UUID.fromString(key)); } catch (IllegalArgumentException ignored) { }
             }
         }
         OfflinePlayer offline = Bukkit.getOfflinePlayer(input);
@@ -198,13 +184,9 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
             sender.sendMessage(Component.text("/hardcore death <player>"));
             return true;
         }
-        if (args[0].equalsIgnoreCase("revive")) {
-            revive(sender, args);
-        } else if (args[0].equalsIgnoreCase("death")) {
-            deathReport(sender, args);
-        } else {
-            sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));
-        }
+        if (args[0].equalsIgnoreCase("revive")) revive(sender, args);
+        else if (args[0].equalsIgnoreCase("death")) deathReport(sender, args);
+        else sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));
         return true;
     }
 
@@ -214,10 +196,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
             return;
         }
         OfflinePlayer target = findTarget(args[1]);
-        if (target == null) {
-            sender.sendMessage(Component.text(getConfig().getString("messages.player-not-found", "Could not find that player.")));
-            return;
-        }
+        if (target == null) { sender.sendMessage(Component.text(getConfig().getString("messages.player-not-found", "Could not find that player."))); return; }
         UUID uuid = target.getUniqueId();
         if (!isEliminated(uuid)) {
             sender.sendMessage(Component.text(getConfig().getString("messages.not-eliminated", "%player% is not currently eliminated by HardcoreCore.").replace("%player%", target.getName())));
@@ -239,7 +218,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         saveRecords();
 
         PlayerProfile profile = Bukkit.createProfile(uuid, target.getName());
-        BanList<?> bans = Bukkit.getBanList(BanListType.PROFILE);
+        BanList<PlayerProfile> bans = Bukkit.getBanList(BanListType.PROFILE);
         bans.pardon(profile);
 
         sender.sendMessage(Component.text(getConfig().getString("messages.revive-success", "Revived %player%. Their death remains final and no items/XP were restored.").replace("%player%", target.getName())));
@@ -247,10 +226,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     }
 
     private void deathReport(CommandSender sender, String[] args) {
-        if (args.length != 2) {
-            sender.sendMessage(Component.text(getConfig().getString("messages.death-report-usage", "Usage: /hardcore death <player>")));
-            return;
-        }
+        if (args.length != 2) { sender.sendMessage(Component.text(getConfig().getString("messages.death-report-usage", "Usage: /hardcore death <player>"))); return; }
         OfflinePlayer target = findTarget(args[1]);
         if (target == null || records.getConfigurationSection("players." + target.getUniqueId()) == null) {
             sender.sendMessage(Component.text(getConfig().getString("messages.death-not-found", "No Hardcore elimination record was found for %player%.").replace("%player%", args[1])));
