@@ -1,0 +1,15 @@
+name: HardcoreCore
+version: 1.0.0
+main: com.egotrust1.hardcorecore.HardcoreCore
+api-version: '26.2'
+author: egtorust1-design
+description: One-life Hardcore enforcement for Paper 26.2.
+commands:
+  hardcore:
+    description: HardcoreCore administration
+    usage: /hardcore <revive|death> <player> [confirm] [reason]
+    permission: hardcore.admin
+permissions:
+  hardcore.admin:
+    description: Access HardcoreCore administration commands
+    default: op
