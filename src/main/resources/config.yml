@@ -1,0 +1,16 @@
+settings:
+  force-hardcore-worlds: true
+  force-hard-difficulty: true
+  require-revive-confirmation: true
+  require-revive-reason: true
+messages:
+  death-kick: "You died. You have been permanently eliminated from this Hardcore server."
+  death-ban-reason: "Hardcore death"
+  revive-success: "Revived %player%. Their death remains final and no items/XP were restored."
+  revive-usage: "Usage: /hardcore revive <player> confirm <reason>"
+  death-not-found: "No Hardcore elimination record was found for %player%."
+  death-report-usage: "Usage: /hardcore death <player>"
+  player-not-found: "Could not find that player."
+  no-permission: "You do not have permission to use this command."
+  not-eliminated: "%player% is not currently eliminated by HardcoreCore."
+  login-denied: "You have been eliminated from this Hardcore server."
