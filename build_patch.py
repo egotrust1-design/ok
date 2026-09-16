@@ -1,20 +1,16 @@
 from pathlib import Path
 import re
 
-# Intro reliability + presentation patch; applied during CI before the Maven build.
 path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
 src = path.read_text()
 
-# Keep the intro completely borderless.
+# Prompt: borderless and always rendered at full light so it remains visible in the void.
 if 'd.setBackgroundColor(null);' not in src:
     needle = 'd.setDefaultBackground(false);\n            d.setLineWidth(240);'
     replacement = 'd.setDefaultBackground(false);\n            d.setBackgroundColor(null);\n            d.setLineWidth(240);'
     if needle not in src:
         raise SystemExit('Could not find TextDisplay background configuration')
     src = src.replace(needle, replacement, 1)
-
-# Make the prompt render at full display brightness so client brightness/night-vision settings
-# do not make the actual "BEGIN" prompt disappear into the void.
 if 'd.setBrightness(new org.bukkit.entity.Display.Brightness(15, 15));' not in src:
     needle = 'd.setViewRange(20.0f);'
     replacement = 'd.setViewRange(20.0f);\n            d.setBrightness(new org.bukkit.entity.Display.Brightness(15, 15));'
@@ -22,17 +18,21 @@ if 'd.setBrightness(new org.bukkit.entity.Display.Brightness(15, 15));' not in s
         raise SystemExit('Could not find TextDisplay view range configuration')
     src = src.replace(needle, replacement, 1)
 
-# Do not use Blindness for the visual effect. The intro is already an actual void world;
-# client brightness settings should not be able to hide the prompt itself.
-src = src.replace(
-    '        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n',
-    ''
-)
-src = src.replace(
-    '        p.removePotionEffect(PotionEffectType.BLINDNESS);\n',
-    ''
-)
+# Restore the darkness effect the user liked, while keeping the display itself fully lit.
+src = re.sub(r'\s*p\.addPotionEffect\(new PotionEffect\(PotionEffectType\.BLINDNESS,.*?\);', '', src)
+if 'PotionEffectType.BLINDNESS' not in src:
+    needle = '        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));\n'
+    if needle not in src:
+        raise SystemExit('Could not find intro effect insertion point')
+    src = src.replace(needle, needle + '        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n', 1)
+# Ensure both completion and reset remove blindness.
+if src.count('p.removePotionEffect(PotionEffectType.BLINDNESS);') < 2:
+    needle = '        p.removePotionEffect(PotionEffectType.SLOWNESS);\n'
+    replacement = needle + '        p.removePotionEffect(PotionEffectType.BLINDNESS);\n'
+    src = src.replace(needle, replacement, 2)
 
+# Particle load: the old build emitted ~860 particles/sec/player. Keep visible falling ash,
+# but cut packet/object churn by ~8x.
 particle_method = r'''    private void startIntroParticles(Player p) {
         stopIntroParticles(p.getUniqueId());
         UUID id = p.getUniqueId();
@@ -45,33 +45,109 @@ particle_method = r'''    private void startIntroParticles(Player p) {
                     return;
                 }
                 Location b = p.getLocation();
-                for (int i = 0; i < 62; i++) {
+                for (int i = 0; i < 18; i++) {
                     double x = b.getX() + (Math.random() * 14.0 - 7.0);
                     double z = b.getZ() + (Math.random() * 14.0 - 7.0);
                     double y = b.getY() + 3.0 + Math.random() * 7.0;
-                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.22, 0.0, 0.0);
+                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.20, 0.0, 0.0);
                 }
-                for (int i = 0; i < 24; i++) {
+                for (int i = 0; i < 8; i++) {
                     double x = b.getX() + (Math.random() * 6.0 - 3.0);
                     double z = b.getZ() + (Math.random() * 6.0 - 3.0);
                     double y = b.getY() + 1.8 + Math.random() * 4.5;
-                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.28, 0.0, 0.0);
+                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.25, 0.0, 0.0);
                 }
             }
-        }.runTaskTimer(this, 0L, 2L);
+        }.runTaskTimer(this, 0L, 4L);
         introParticleTasks.put(id, task);
     }
 '''
-src, count = re.subn(
-    r'    private void startIntroParticles\(Player p\) \{.*?\n    private void stopIntroParticles',
-    lambda _: particle_method + '    private void stopIntroParticles',
-    src,
-    count=1,
-    flags=re.S,
-)
+src, count = re.subn(r'    private void startIntroParticles\(Player p\) \{.*?\n    private void stopIntroParticles', lambda _: particle_method + '    private void stopIntroParticles', src, count=1, flags=re.S)
 if count != 1:
     raise SystemExit('Could not replace intro particle method')
 
+# One queued book-open per player prevents double-open races from multiple M1 events.
+if 'private final Set<UUID> introBookQueued' not in src:
+    needle = '    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n'
+    if needle not in src:
+        raise SystemExit('Could not find intro instance field')
+    src = src.replace(needle, needle + '    private final Set<UUID> introBookQueued = new HashSet<>();\n', 1)
+
+queue_method = r'''    private void queueIntroBook(Player p) {
+        UUID id = p.getUniqueId();
+        if (!introPlayers.contains(id) || introBookQueued.contains(id)) return;
+        introBookQueued.add(id);
+        Bukkit.getScheduler().runTask(this, () -> {
+            introBookQueued.remove(id);
+            if (p.isOnline() && introPlayers.contains(id)) openIntroductionBook(p);
+        });
+    }
+
+'''
+if 'private void queueIntroBook(Player p)' not in src:
+    marker = '    private void openIntroductionBook(Player p) {'
+    if marker not in src:
+        raise SystemExit('Could not find intro book method marker')
+    src = src.replace(marker, queue_method + marker, 1)
+
+# Catch the arm swing itself. This is more reliable than depending on the interaction entity,
+# especially when the player is looking directly at the floating text.
+click_handlers = r'''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroArmSwing(org.bukkit.event.player.PlayerAnimationEvent e) {
+        if (e.getAnimationType() != org.bukkit.event.player.PlayerAnimationType.ARM_SWING) return;
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        queueIntroBook(p);
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroLeftClick(org.bukkit.event.player.PlayerInteractEvent e) {
+        if (e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_AIR
+                && e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_BLOCK) return;
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        e.setCancelled(true);
+        queueIntroBook(p);
+    }
+
+'''
+src, _ = re.subn(r'    @EventHandler\(priority = EventPriority\.(?:LOWEST|HIGHEST)[^\n]*\)\n    public void onIntroLeftClick\([^\{]+\{.*?\n    \}\n\n', '', src, count=1, flags=re.S)
+if 'public void onIntroArmSwing' not in src:
+    marker = '    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)\n    public void onIntroEntityInteract'
+    if marker not in src:
+        raise SystemExit('Could not find intro interaction marker')
+    src = src.replace(marker, click_handlers + marker, 1)
+
+# Entity attack path also uses the queue and is allowed to run even if another plugin cancels first.
+entity_pattern = r'''    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onIntroEntityDamage(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player p)) return;
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (!isIntroTarget(p.getUniqueId(), e.getEntity())) return;
+        e.setCancelled(true);
+        openIntroductionBook(p);
+    }'''
+entity_replacement = r'''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroEntityDamage(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player p)) return;
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (!isIntroTarget(p.getUniqueId(), e.getEntity())) return;
+        e.setCancelled(true);
+        queueIntroBook(p);
+    }'''
+src, count = re.subn(entity_pattern, entity_replacement, src, count=1)
+if count != 1:
+    raise SystemExit('Could not replace intro entity click handler')
+
+# Rejoin hardening: always clear any stale session state before starting a new one for that UUID.
+marker = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
+replacement = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        introBookQueued.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
+if marker in src and 'introBookQueued.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);' not in src:
+    src = src.replace(marker, replacement, 1)
+# Complete/reset/quit paths should also clear queued opens.
+src = src.replace('        introPlayers.remove(id);\n        stopIntroParticles(id);', '        introPlayers.remove(id);\n        introBookQueued.remove(id);\n        stopIntroParticles(id);')
+
+# Short vanilla-safe introduction book.
 book_method = r'''    private void openIntroductionBook(Player p) {
         ItemStack book = new ItemStack(org.bukkit.Material.WRITTEN_BOOK);
         BookMeta meta = (BookMeta) book.getItemMeta();
@@ -92,50 +168,9 @@ book_method = r'''    private void openIntroductionBook(Player p) {
         p.openBook(book);
     }
 '''
-src, count = re.subn(
-    r'    private void openIntroductionBook\(Player p\) \{.*?\n    private void completeIntroduction',
-    lambda _: book_method + '    private void completeIntroduction',
-    src,
-    count=1,
-    flags=re.S,
-)
+src, count = re.subn(r'    private void openIntroductionBook\(Player p\) \{.*?\n    private void completeIntroduction', lambda _: book_method + '    private void completeIntroduction', src, count=1, flags=re.S)
 if count != 1:
     raise SystemExit('Could not replace intro book method')
 
-# Replace the old click handler with a lowest-priority handler that does NOT use
-# ignoreCancelled. This makes it a reliable fallback even if another plugin touches
-# PlayerInteractEvent first. The actual book opening is scheduled one tick later.
-click_handler = r'''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
-    public void onIntroLeftClick(org.bukkit.event.player.PlayerInteractEvent e) {
-        Player p = e.getPlayer();
-        UUID id = p.getUniqueId();
-        if (!introPlayers.contains(id)) return;
-        if (e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_AIR
-                && e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_BLOCK) return;
-        e.setCancelled(true);
-        Bukkit.getScheduler().runTask(this, () -> {
-            if (p.isOnline() && introPlayers.contains(id)) openIntroductionBook(p);
-        });
-    }
-
-'''
-pattern = r'    @EventHandler\(priority = EventPriority\.HIGHEST[^\n]*\)\n    public void onIntroLeftClick\([^\{]+\{.*?\n    \}\n\n'
-src, count = re.subn(pattern, click_handler, src, count=1, flags=re.S)
-if count == 0:
-    marker = '    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)\n    public void onIntroEntityInteract'
-    if marker not in src:
-        raise SystemExit('Could not find intro entity interaction marker')
-    src = src.replace(marker, click_handler + marker, 1)
-
-# Rejoin/cleanup hardening: clear every stale per-player intro object/task/slot before
-# starting a fresh intro session. This prevents one player's old session from affecting
-# a later join and keeps simultaneous introductions isolated by UUID.
-if 'introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo' not in src:
-    marker = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
-    replacement = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
-    if marker not in src:
-        raise SystemExit('Could not find intro startup marker')
-    src = src.replace(marker, replacement, 1)
-
 path.write_text(src)
-print('HardcoreCore intro reliability patch applied successfully.')
+print('HardcoreCore intro deep reliability + performance patch applied successfully.')
