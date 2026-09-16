@@ -40,7 +40,7 @@ if 'import org.bukkit.event.player.PlayerInteractEvent;' not in s:
 if 'private final Set<UUID> introBookQueued' not in s:
     s = s.replace('    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n', '    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n    private final Set<UUID> introBookQueued = new HashSet<>();\n    private final Set<UUID> introTransitioning = new HashSet<>();\n', 1)
 
-# Gravity is disabled in the limbo, so keep the temporary flight permission on.
+# Gravity is disabled in the limbo, so keep temporary flight permission on.
 s = s.replace(
     '        p.setAllowFlight(false);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
     '        p.setAllowFlight(true);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
@@ -78,7 +78,7 @@ particle = '''    private void startIntroParticles(Player p) {
     }'''
 s = replace_method(s, '    private void startIntroParticles(Player p)', particle)
 
-# Reliable M1: both the client interact event and arm-swing animation feed the same queued open.
+# Reliable M1: both interact and arm swing feed the same queued open.
 if 'private void queueIntroBook(Player p)' not in s:
     q = '''    private void queueIntroBook(Player p) {
         UUID id = p.getUniqueId();
@@ -185,13 +185,12 @@ on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     }'''
 s = replace_method(s, '    public void onJoin(PlayerJoinEvent e)', on_join)
 
-# Find safe ground close to the target world's spawn.
-if 'private Location safeSpawn(World world)' not in s:
-    helper = '''    private Location safeSpawn(World world) {
+# Safe ground helper; always inserted for this build because the source baseline does not contain it.
+helper = '''    private Location safeSpawn(World world) {
         Location base = world.getSpawnLocation().clone();
         int bx = base.getBlockX();
         int bz = base.getBlockZ();
-        for (int r = 0; r <= 8; r++) {
+        for (int r = 0; r <= 12; r++) {
             for (int dx = -r; dx <= r; dx++) {
                 for (int dz = -r; dz <= r; dz++) {
                     int x = bx + dx;
@@ -211,7 +210,22 @@ if 'private Location safeSpawn(World world)' not in s:
     }
 
 '''
-    s = s.replace('    private void beginWorldDrop(Player p) {', helper + '    private void beginWorldDrop(Player p) {', 1)
+# Remove any prior copies from an earlier build patch, then add exactly one.
+while '    private Location safeSpawn(World world)' in s:
+    start = s.find('    private Location safeSpawn(World world)')
+    brace = s.find('{', start)
+    depth = 0
+    end = None
+    for i in range(brace, len(s)):
+        if s[i] == '{': depth += 1
+        elif s[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    s = s[:start] + s[end:]
+    break
+s = s.replace('    private void completeIntroduction(Player p)', helper + '    private void completeIntroduction(Player p)', 1)
 
 # Reset all temporary intro state.
 reset = '''    private void resetIntroState(Player p) {
@@ -237,7 +251,7 @@ reset = '''    private void resetIntroState(Player p) {
     }'''
 s = replace_method(s, '    private void resetIntroState(Player p)', reset)
 
-# Start the cutscene in limbo, but DO NOT hide players from one another.
+# Ensure the introductory cutscene never alters player visibility.
 start_intro = '''    private void startIntroduction(Player p) {
         if (!p.isOnline()) return;
         UUID id = p.getUniqueId();
@@ -263,8 +277,7 @@ start_intro = '''    private void startIntroduction(Player p) {
         p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));
         p.teleport(introPlayerLocation(id));
 
-        // Deliberately no hidePlayer/showPlayer calls here. The introduction is a cutscene,
-        // not a private-server state: players must remain normal in tab, chat, and join/quit display.
+        // No hidePlayer calls: the player remains fully normal in tab, chat, and join/quit messages.
 
         p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
         p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
@@ -276,7 +289,7 @@ start_intro = '''    private void startIntroduction(Player p) {
     }'''
 s = replace_method(s, '    private void startIntroduction(Player p)', start_intro)
 
-# Smooth, controlled sky drop: shorter drop, gentle initial velocity, and a soft brake near the ground.
+# Smooth controlled sky drop. Persist the drop state before moving the player.
 begin_drop = '''    private void beginWorldDrop(Player p) {
         UUID id = p.getUniqueId();
         if (!introPlayers.contains(id) || introTransitioning.contains(id)) return;
@@ -316,30 +329,32 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
         p.setFlying(false);
         p.setWalkSpeed(0.2f);
         p.setFlySpeed(0.1f);
+        p.setFallDistance(0.0f);
         p.removePotionEffect(PotionEffectType.BLINDNESS);
         p.removePotionEffect(PotionEffectType.SLOWNESS);
-        p.setFallDistance(0.0f);
         p.teleport(drop);
-        p.setVelocity(new Vector(0.0, -0.05, 0.0));
+        p.setVelocity(new Vector(0.0, -0.10, 0.0));
 
         new BukkitRunnable() {
             int ticks = 0;
             @Override public void run() {
                 if (!p.isOnline()) { cancel(); return; }
                 ticks++;
-                Location now = p.getLocation();
-                double aboveGround = now.getY() - safe.getY();
-                // Ease the descent near the ground instead of snapping into the landing.
-                if (aboveGround < 10.0) {
-                    p.setVelocity(new Vector(0.0, Math.max(-0.08, p.getVelocity().getY() * 0.82), 0.0));
-                }
                 p.setFallDistance(0.0f);
-                if (p.isOnGround() || aboveGround <= 0.15 || ticks >= 100) {
+                double dist = p.getY() - safe.getY();
+                if (dist > 10.0) {
+                    p.setVelocity(new Vector(0.0, -0.10, 0.0));
+                } else if (dist > 2.0) {
+                    p.setVelocity(new Vector(0.0, -0.055, 0.0));
+                } else {
+                    p.setVelocity(new Vector(0.0, -0.02, 0.0));
+                }
+                if (p.isOnGround() || ticks >= 100) {
                     p.teleport(safe);
                     p.setVelocity(new Vector(0.0, 0.0, 0.0));
+                    p.setFallDistance(0.0f);
                     p.setAllowFlight(false);
                     p.setFlying(false);
-                    p.setFallDistance(0.0f);
                     records.set("players." + id + ".intro-drop-pending", false);
                     saveRecords();
                     p.sendMessage(Component.text("Welcome to the Hardcore SMP."));
@@ -356,4 +371,4 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
 s = replace_method(s, '    private void completeIntroduction(Player p)', begin_drop)
 
 P.write_text(s)
-print('Updated intro: normal visibility/tab/chat, dual click detection, safer book opening, smoother landing, and reconnect safety.')
+print('Patched intro: reliable book click, normal tab/chat visibility, safe spawn helper, and smoother landing.')
