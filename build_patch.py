@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 
+# Intro reliability + presentation patch; applied during CI before the Maven build.
 path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
 src = path.read_text()
 
@@ -101,10 +102,9 @@ src, count = re.subn(
 if count != 1:
     raise SystemExit('Could not replace intro book method')
 
-# Replace the previous click handler with a lowest-priority handler that does NOT use
-# ignoreCancelled. This makes it the final reliable fallback even if another plugin touches
-# PlayerInteractEvent first. Opening is scheduled one tick later so the client has a stable
-# intro state before the book UI is opened.
+# Replace the old click handler with a lowest-priority handler that does NOT use
+# ignoreCancelled. This makes it a reliable fallback even if another plugin touches
+# PlayerInteractEvent first. The actual book opening is scheduled one tick later.
 click_handler = r'''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onIntroLeftClick(org.bukkit.event.player.PlayerInteractEvent e) {
         Player p = e.getPlayer();
@@ -127,8 +127,10 @@ if count == 0:
         raise SystemExit('Could not find intro entity interaction marker')
     src = src.replace(marker, click_handler + marker, 1)
 
-# Rejoin/cleanup hardening: make sure a stale intro instance can never survive a reconnect.
-if 'records.set("players." + id + ".intro-complete", false);' not in src:
+# Rejoin/cleanup hardening: clear every stale per-player intro object/task/slot before
+# starting a fresh intro session. This prevents one player's old session from affecting
+# a later join and keeps simultaneous introductions isolated by UUID.
+if 'introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo' not in src:
     marker = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
     replacement = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
     if marker not in src:
