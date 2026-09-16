@@ -7,7 +7,7 @@ description: One-life Hardcore enforcement for Paper 26.2 with server rules.
 commands:
   hardcore:
     description: HardcoreCore administration and introduction
-    usage: /hardcore <revive|death|intro> <player> [confirm] [reason]
+    usage: /hardcore <revive|death|intro> [player] [confirm] [reason]
   rules:
     description: Opens the server rules
     usage: /rules
