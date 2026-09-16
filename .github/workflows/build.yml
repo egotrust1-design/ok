@@ -1,7 +1,7 @@
 name: Build HardcoreCore
 on:
   push:
-    branches: [ main ]
+    branches: [ main, build-fixed-artifact ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -18,6 +18,22 @@ jobs:
           cache: maven
       - name: Patch intro
         run: python3 build_patch.py
+      - name: Sanitize generated source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
+          src = path.read_text()
+          lines = src.splitlines(keepends=True)
+          out = []
+          for line in lines:
+              if line.lstrip().startswith('@EventHandler') and out and out[-1].lstrip().startswith('@EventHandler'):
+                  out[-1] = line
+              else:
+                  out.append(line)
+          path.write_text(''.join(out))
+          print('Generated source sanitized.')
+          PY
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
@@ -25,5 +41,5 @@ jobs:
       - name: Upload plugin JAR
         uses: actions/upload-artifact@v4
         with:
-          name: HardcoreCore-1.0.0
+          name: HardcoreCore-1.0.0-fixed
           path: target/HardcoreCore-1.0.0.jar
