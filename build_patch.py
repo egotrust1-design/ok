@@ -25,14 +25,12 @@ if 'PotionEffectType.BLINDNESS' not in src:
     if needle not in src:
         raise SystemExit('Could not find intro effect insertion point')
     src = src.replace(needle, needle + '        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n', 1)
-# Ensure both completion and reset remove blindness.
 if src.count('p.removePotionEffect(PotionEffectType.BLINDNESS);') < 2:
     needle = '        p.removePotionEffect(PotionEffectType.SLOWNESS);\n'
     replacement = needle + '        p.removePotionEffect(PotionEffectType.BLINDNESS);\n'
     src = src.replace(needle, replacement, 2)
 
-# Particle load: the old build emitted ~860 particles/sec/player. Keep visible falling ash,
-# but cut packet/object churn by ~8x.
+# Particle load: keep the ash look without hammering the client.
 particle_method = r'''    private void startIntroParticles(Player p) {
         stopIntroParticles(p.getUniqueId());
         UUID id = p.getUniqueId();
@@ -72,14 +70,19 @@ if 'private final Set<UUID> introBookQueued' not in src:
     if needle not in src:
         raise SystemExit('Could not find intro instance field')
     src = src.replace(needle, needle + '    private final Set<UUID> introBookQueued = new HashSet<>();\n', 1)
+if 'private final Set<UUID> introTransitioning' not in src:
+    needle = '    private final Set<UUID> introBookQueued = new HashSet<>();\n'
+    if needle not in src:
+        raise SystemExit('Could not find intro book queue field')
+    src = src.replace(needle, needle + '    private final Set<UUID> introTransitioning = new HashSet<>();\n', 1)
 
 queue_method = r'''    private void queueIntroBook(Player p) {
         UUID id = p.getUniqueId();
-        if (!introPlayers.contains(id) || introBookQueued.contains(id)) return;
+        if (!introPlayers.contains(id) || introTransitioning.contains(id) || introBookQueued.contains(id)) return;
         introBookQueued.add(id);
         Bukkit.getScheduler().runTask(this, () -> {
             introBookQueued.remove(id);
-            if (p.isOnline() && introPlayers.contains(id)) openIntroductionBook(p);
+            if (p.isOnline() && introPlayers.contains(id) && !introTransitioning.contains(id)) openIntroductionBook(p);
         });
     }
 
@@ -90,8 +93,6 @@ if 'private void queueIntroBook(Player p)' not in src:
         raise SystemExit('Could not find intro book method marker')
     src = src.replace(marker, queue_method + marker, 1)
 
-# Catch the arm swing itself. This is more reliable than depending on the interaction entity,
-# especially when the player is looking directly at the floating text.
 click_handlers = r'''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onIntroArmSwing(org.bukkit.event.player.PlayerAnimationEvent e) {
         if (e.getAnimationType() != org.bukkit.event.player.PlayerAnimationType.ARM_SWING) return;
@@ -118,7 +119,6 @@ if 'public void onIntroArmSwing' not in src:
         raise SystemExit('Could not find intro interaction marker')
     src = src.replace(marker, click_handlers + marker, 1)
 
-# Entity attack path also uses the queue and is allowed to run even if another plugin cancels first.
 entity_pattern = r'''    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onIntroEntityDamage(EntityDamageByEntityEvent e) {
         if (!(e.getDamager() instanceof Player p)) return;
@@ -141,36 +141,87 @@ if count != 1:
 
 # Rejoin hardening: always clear any stale session state before starting a new one for that UUID.
 marker = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
-replacement = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        introBookQueued.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
-if marker in src and 'introBookQueued.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);' not in src:
+replacement = '        if (records.getBoolean("players." + id + ".intro-complete", false)) return;\n        introBookQueued.remove(id);\n        introTransitioning.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);\n        stopIntroParticles(id);\n        stopIntroAmbient(id);\n        releaseIntroInstanceSlot(id);\n        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);'
+if marker in src and 'introTransitioning.remove(id);\n        introPlayers.remove(id);\n        removeIntroPrompt(id);' not in src:
     src = src.replace(marker, replacement, 1)
-# Complete/reset/quit paths should also clear queued opens.
-src = src.replace('        introPlayers.remove(id);\n        stopIntroParticles(id);', '        introPlayers.remove(id);\n        introBookQueued.remove(id);\n        stopIntroParticles(id);')
+src = src.replace('        introPlayers.remove(id);\n        stopIntroParticles(id);', '        introPlayers.remove(id);\n        introBookQueued.remove(id);\n        introTransitioning.remove(id);\n        stopIntroParticles(id);')
 
-# Short vanilla-safe introduction book.
-book_method = r'''    private void openIntroductionBook(Player p) {
-        ItemStack book = new ItemStack(org.bukkit.Material.WRITTEN_BOOK);
-        BookMeta meta = (BookMeta) book.getItemMeta();
-        meta.title(Component.text("Before You Enter"));
-        meta.author(Component.text("Hardcore SMP"));
-        meta.addPages(
-                Component.text("ONE LIFE\n\nYou get one shot. Death ends your story unless an admin brings you back."),
-                Component.text("THE WORLD\n\nBuild. Explore. Prepare. The world is not safe, and not everything is what it seems."),
-                Component.text("OTHER PLAYERS\n\nFight. Trade. Ally. Betray. Trust is earned."),
-                Component.text("SURVIVAL\n\nKeep food. Guard your gear. Know where you are going before you leave."),
-                Component.text("REMEMBER\n\nA bad decision can end everything. Make yours carefully."),
-                Component.text("Ready?\n\nStep into the world and make your mark.\n\n")
-                        .append(Component.text("[ ENTER THE WORLD ]")
-                                .color(TextColor.color(180, 30, 30))
-                                .clickEvent(ClickEvent.runCommand("/hardcore intro")))
-        );
-        book.setItemMeta(meta);
-        p.openBook(book);
+# Replace the intro completion with a controlled sky-drop transition.
+transition_methods = r'''    private void beginWorldDrop(Player p) {
+        UUID id = p.getUniqueId();
+        if (!introPlayers.contains(id) || introTransitioning.contains(id)) return;
+        introTransitioning.add(id);
+        introBookQueued.remove(id);
+        removeIntroPrompt(id);
+        stopIntroParticles(id);
+        stopIntroAmbient(id);
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.closeInventory();
+
+        World target = null;
+        if (getConfig().getBoolean("settings.intro-use-main-world-spawn", true) && !Bukkit.getWorlds().isEmpty()) {
+            target = Bukkit.getWorlds().get(0);
+        }
+        if (target == null || isIntroWorld(target)) {
+            for (World w : Bukkit.getWorlds()) {
+                if (!isIntroWorld(w)) {
+                    target = w;
+                    break;
+                }
+            }
+        }
+        if (target == null) {
+            introTransitioning.remove(id);
+            return;
+        }
+
+        int sx = target.getSpawnLocation().getBlockX();
+        int sz = target.getSpawnLocation().getBlockZ();
+        Location ground = target.getHighestBlockAt(sx, sz).getLocation().add(0.5, 1.0, 0.5);
+        if (!ground.getBlock().isEmpty()) ground.add(0.0, 1.0, 0.0);
+        Location drop = ground.clone().add(0.0, 96.0, 0.0);
+        drop.setYaw(target.getSpawnLocation().getYaw());
+        drop.setPitch(0.0f);
+
+        introPlayers.remove(id);
+        releaseIntroInstanceSlot(id);
+        restoreVisibility(p);
+        p.setGameMode(GameMode.SURVIVAL);
+        p.setAllowFlight(false);
+        p.setFlying(false);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
+        p.setGravity(true);
+        p.setVelocity(new Vector(0.0, -0.20, 0.0));
+        p.teleport(drop);
+
+        records.set("players." + id + ".intro-complete", true);
+        records.set("players." + id + ".intro-complete-time", Instant.now().toString());
+        records.set("players." + id + ".name", p.getName());
+        saveRecords();
+
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!p.isOnline()) {
+                introTransitioning.remove(id);
+                p.removePotionEffect(PotionEffectType.BLINDNESS);
+                return;
+            }
+            p.removePotionEffect(PotionEffectType.BLINDNESS);
+            p.sendMessage(Component.text("Welcome to the Hardcore SMP."));
+            introTransitioning.remove(id);
+        }, 30L);
     }
+
+    private void completeIntroduction(Player p) {
+        beginWorldDrop(p);
+    }
+
 '''
-src, count = re.subn(r'    private void openIntroductionBook\(Player p\) \{.*?\n    private void completeIntroduction', lambda _: book_method + '    private void completeIntroduction', src, count=1, flags=re.S)
+src, count = re.subn(r'    private void completeIntroduction\(Player p\) \{.*?\n    private void resetIntroState', lambda _: transition_methods + '    private void resetIntroState', src, count=1, flags=re.S)
 if count != 1:
-    raise SystemExit('Could not replace intro book method')
+    raise SystemExit('Could not replace intro completion method')
 
 path.write_text(src)
-print('HardcoreCore intro deep reliability + performance patch applied successfully.')
+print('HardcoreCore intro sky-drop transition + reliability/performance patch applied successfully.')
