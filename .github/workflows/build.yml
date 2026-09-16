@@ -16,6 +16,66 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
+      - name: Polish intro before build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
+          src = path.read_text()
+
+          # Remove the TextDisplay background/border completely.
+          src = src.replace(
+              'd.setDefaultBackground(false);\n            d.setLineWidth(240);',
+              'd.setDefaultBackground(false);\n            d.setBackgroundColor(null);\n            d.setLineWidth(240);'
+          )
+
+          # Make the limbo visually pitch black while keeping the nearby text readable.
+          src = src.replace(
+              'p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));\n        p.teleport(introPlayerLocation(id));',
+              'p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));\n        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n        p.teleport(introPlayerLocation(id));'
+          )
+
+          # Remove the darkness effect cleanly on both normal completion and reset/quit.
+          src = src.replace(
+              'p.removePotionEffect(PotionEffectType.SLOWNESS);',
+              'p.removePotionEffect(PotionEffectType.SLOWNESS);\n        p.removePotionEffect(PotionEffectType.BLINDNESS);'
+          )
+
+          # Replace the ash effect with denser, lower-falling white ash. Remove the soul-flame particles.
+          particle = '''    private void startIntroParticles(Player p) {\n        stopIntroParticles(p.getUniqueId());\n        UUID id = p.getUniqueId();\n        BukkitTask task = new BukkitRunnable() {\n            @Override\n            public void run() {\n                if (!p.isOnline() || !introPlayers.contains(id)) {\n                    cancel();\n                    introParticleTasks.remove(id);\n                    return;\n                }\n                Location b = p.getLocation();\n                for (int i = 0; i < 55; i++) {\n                    double x = b.getX() + (Math.random() * 14.0 - 7.0);\n                    double z = b.getZ() + (Math.random() * 14.0 - 7.0);\n                    double y = b.getY() + 2.5 + Math.random() * 8.5;\n                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.16, 0.0, 0.0);\n                }\n                for (int i = 0; i < 18; i++) {\n                    double x = b.getX() + (Math.random() * 8.0 - 4.0);\n                    double z = b.getZ() + (Math.random() * 8.0 - 4.0);\n                    double y = b.getY() + 1.5 + Math.random() * 5.0;\n                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.20, 0.0, 0.0);\n                }\n            }\n        }.runTaskTimer(this, 0L, 2L);\n        introParticleTasks.put(id, task);\n    }\n'''
+          src, count = re.subn(
+              r'    private void startIntroParticles\(Player p\) \{.*?\n    private void stopIntroParticles',
+              particle + '    private void stopIntroParticles',
+              src,
+              count=1,
+              flags=re.S
+          )
+          if count != 1:
+              raise SystemExit('Could not replace startIntroParticles')
+
+          # Shorter, cleaner book pages that stay comfortably below Minecraft's per-page limit.
+          book = '''    private void openIntroductionBook(Player p) {\n        ItemStack book = new ItemStack(org.bukkit.Material.WRITTEN_BOOK);\n        BookMeta meta = (BookMeta) book.getItemMeta();\n        meta.title(Component.text("Before You Enter"));\n        meta.author(Component.text("Hardcore SMP"));\n        meta.addPages(\n                Component.text("You have one life.\\n\\nThere is no second chance here.\\nWhat happens next is up to you."),\n                Component.text("Players can fight, steal, ally, betray, or survive alone.\\n\\nTrust carefully."),\n                Component.text("Death is permanent.\\n\\nYou are out unless an admin officially revives you."),\n                Component.text("Explore. Build. Prepare.\\n\\nThe world keeps secrets. Not everything dangerous announces itself."),\n                Component.text("Protect your life.\\n\\nProtect your gear.\\n\\nAnd remember: nobody owes you safety."),\n                Component.text("Ready?\\n\\nThe world is waiting.\\n\\n")\n                        .append(Component.text("[ ENTER THE WORLD ]")\n                                .color(TextColor.color(180, 30, 30))\n                                .clickEvent(ClickEvent.runCommand("/hardcore intro")))\n        );\n        book.setItemMeta(meta);\n        p.openBook(book);\n    }\n'''
+          src, count = re.subn(
+              r'    private void openIntroductionBook\(Player p\) \{.*?\n    private void completeIntroduction',
+              book + '    private void completeIntroduction',
+              src,
+              count=1,
+              flags=re.S
+          )
+          if count != 1:
+              raise SystemExit('Could not replace openIntroductionBook')
+
+          # M1 must work even if the client has not received the Interaction hitbox yet.
+          click_handler = '''    @EventHandler(priority = EventPriority.HIGHEST)\n    public void onIntroLeftClick(org.bukkit.event.player.PlayerInteractEvent e) {\n        Player p = e.getPlayer();\n        if (!introPlayers.contains(p.getUniqueId())) return;\n        if (e.getAction() == org.bukkit.event.block.Action.LEFT_CLICK_AIR\n                || e.getAction() == org.bukkit.event.block.Action.LEFT_CLICK_BLOCK) {\n            e.setCancelled(true);\n            openIntroductionBook(p);\n        }\n    }\n\n'''
+          marker = '    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)\n    public void onIntroEntityInteract'
+          if marker not in src:
+              raise SystemExit('Could not find intro entity interact marker')
+          src = src.replace(marker, click_handler + marker, 1)
+
+          path.write_text(src)
+          PY
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
