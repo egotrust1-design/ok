@@ -54,10 +54,11 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     private static final String INTRO_MUSIC = "minecraft:music.end";
     private static final String INTRO_AMBIENT_1 = "minecraft:block.respawn_anchor.ambient";
     private static final String INTRO_AMBIENT_2 = "minecraft:ambient.soul_sand_valley.mood";
-    private static final double INTRO_X = 0.5;
     private static final double INTRO_Y = 120.0;
     private static final double INTRO_Z = 0.5;
     private static final double TEXT_DISTANCE = 2.15;
+    private static final int INTRO_INSTANCE_SPACING = 512;
+
     private File recordsFile;
     private org.bukkit.configuration.file.YamlConfiguration records;
     private final Set<UUID> introPlayers = new HashSet<>();
@@ -65,75 +66,727 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     private final Map<UUID, BukkitTask> introAmbientTasks = new HashMap<>();
     private final Map<UUID, TextDisplay> introTextDisplays = new HashMap<>();
     private final Map<UUID, Interaction> introHitboxes = new HashMap<>();
+    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();
+    private final TreeSet<Integer> freeIntroInstanceSlots = new TreeSet<>();
+    private int nextIntroInstanceSlot = 0;
 
-    @Override public void onEnable() {
+    @Override
+    public void onEnable() {
         saveDefaultConfig();
-        if (!getDataFolder().exists() && !getDataFolder().mkdirs()) { getLogger().severe("Could not create plugin data folder."); getServer().getPluginManager().disablePlugin(this); return; }
+        if (!getDataFolder().exists() && !getDataFolder().mkdirs()) {
+            getLogger().severe("Could not create plugin data folder.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
         File oldRecordsFile = new File(getDataFolder(), "eliminations.yml");
         File externalDataFolder = new File(getDataFolder().getParentFile(), "HardcoreCoreData");
-        if (!externalDataFolder.exists() && !externalDataFolder.mkdirs()) { getLogger().severe("Could not create external HardcoreCoreData folder."); getServer().getPluginManager().disablePlugin(this); return; }
+        if (!externalDataFolder.exists() && !externalDataFolder.mkdirs()) {
+            getLogger().severe("Could not create external HardcoreCoreData folder.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
         recordsFile = new File(externalDataFolder, "eliminations.yml");
-        if (!recordsFile.exists() && oldRecordsFile.exists()) { try { Files.copy(oldRecordsFile.toPath(), recordsFile.toPath(), StandardCopyOption.COPY_ATTRIBUTES); } catch (IOException e) { getLogger().severe("Could not migrate elimination records: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; } }
+        if (!recordsFile.exists() && oldRecordsFile.exists()) {
+            try {
+                Files.copy(oldRecordsFile.toPath(), recordsFile.toPath(), StandardCopyOption.COPY_ATTRIBUTES);
+            } catch (IOException e) {
+                getLogger().severe("Could not migrate elimination records: " + e.getMessage());
+                getServer().getPluginManager().disablePlugin(this);
+                return;
+            }
+        }
         records = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(recordsFile);
         getServer().getPluginManager().registerEvents(this, this);
-        if (getCommand("hardcore") != null) { getCommand("hardcore").setExecutor(this); getCommand("hardcore").setTabCompleter(this); }
+        if (getCommand("hardcore") != null) {
+            getCommand("hardcore").setExecutor(this);
+            getCommand("hardcore").setTabCompleter(this);
+        }
         if (getCommand("rules") != null) getCommand("rules").setExecutor(this);
-        createIntroWorld(); enforceWorldRules(); restoreEliminationBans();
+        createIntroWorld();
+        cleanupPersistedIntroEntities();
+        enforceWorldRules();
+        restoreEliminationBans();
         getLogger().info("HardcoreCore 1.0.0 enabled.");
     }
-    @Override public void onDisable() { for (BukkitTask t : introParticleTasks.values()) t.cancel(); for (BukkitTask t : introAmbientTasks.values()) t.cancel(); introParticleTasks.clear(); introAmbientTasks.clear(); for (UUID id : new ArrayList<>(introPlayers)) { Player p=Bukkit.getPlayer(id); if(p!=null) resetIntroState(p); } removeAllIntroDisplays(); saveRecords(); }
-    private synchronized void saveRecords() { if(records==null||recordsFile==null)return; try{records.save(recordsFile);}catch(IOException e){getLogger().severe("Could not save eliminations.yml: "+e.getMessage());} }
 
-    private void createIntroWorld() { World w=Bukkit.getWorld(INTRO_WORLD_NAME); if(w==null) w=WorldCreator.name(INTRO_WORLD_NAME).type(WorldType.FLAT).generateStructures(false).generator(new VoidGenerator()).hardcore(false).createWorld(); if(w==null){getLogger().severe("Could not create intro limbo world.");return;} w.setDifficulty(Difficulty.PEACEFUL); w.setTime(18000L); w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE,false); w.setGameRule(GameRule.DO_WEATHER_CYCLE,false); w.setStorm(false); w.setPVP(false); w.setSpawnLocation(0,120,0); }
-    private boolean isIntroWorld(World w){return w!=null&&INTRO_WORLD_NAME.equals(w.getName());}
-    private void enforceWorldRules(){for(World w:Bukkit.getWorlds())if(!isIntroWorld(w)){if(getConfig().getBoolean("settings.force-hardcore-worlds",true))w.setHardcore(true);if(getConfig().getBoolean("settings.force-hard-difficulty",true))w.setDifficulty(Difficulty.HARD);}}
-    private void restoreEliminationBans(){org.bukkit.configuration.ConfigurationSection sec=records.getConfigurationSection("players");if(sec==null)return;for(String k:sec.getKeys(false))if(records.getBoolean("players."+k+".eliminated",false))try{UUID id=UUID.fromString(k);Bukkit.getOfflinePlayer(id).ban(getConfig().getString("messages.death-ban-reason","Hardcore death"),(Instant)null,"HardcoreCore");}catch(IllegalArgumentException ignored){}}
+    @Override
+    public void onDisable() {
+        for (BukkitTask t : introParticleTasks.values()) t.cancel();
+        for (BukkitTask t : introAmbientTasks.values()) t.cancel();
+        introParticleTasks.clear();
+        introAmbientTasks.clear();
+        for (UUID id : new ArrayList<>(introPlayers)) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) resetIntroState(p);
+        }
+        removeAllIntroDisplays();
+        saveRecords();
+    }
 
-    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
-    public void onWorldLoad(WorldLoadEvent e){World w=e.getWorld();if(isIntroWorld(w))return;if(getConfig().getBoolean("settings.force-hardcore-worlds",true))w.setHardcore(true);if(getConfig().getBoolean("settings.force-hard-difficulty",true))w.setDifficulty(Difficulty.HARD);}
-    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
-    public void onDeath(PlayerDeathEvent e){Component vanilla=e.deathMessage();if(vanilla!=null)e.deathMessage(vanilla.color(TextColor.color(255,45,45)));Player p=e.getPlayer();UUID id=p.getUniqueId();if(isEliminated(id))return;String path="players."+id;Location death=p.getLocation().clone(),respawn=p.getRespawnLocation();Player killer=p.getKiller();records.set(path+".name",p.getName());records.set(path+".uuid",id.toString());records.set(path+".eliminated",true);records.set(path+".revived",false);records.set(path+".death-time",Instant.now().toString());records.set(path+".cause",killer==null?"NON_PLAYER":"PLAYER");records.set(path+".killer",killer==null?null:killer.getName());records.set(path+".world",death.getWorld()==null?null:death.getWorld().getName());records.set(path+".x",death.getX());records.set(path+".y",death.getY());records.set(path+".z",death.getZ());records.set(path+".respawn-world",respawn==null||respawn.getWorld()==null?null:respawn.getWorld().getName());records.set(path+".respawn-x",respawn==null?null:respawn.getX());records.set(path+".respawn-y",respawn==null?null:respawn.getY());records.set(path+".respawn-z",respawn==null?null:respawn.getZ());saveRecords();p.ban(getConfig().getString("messages.death-ban-reason","Hardcore death"),(Instant)null,"HardcoreCore");String kick=getConfig().getString("messages.death-kick","You died. You have been permanently eliminated from this Hardcore server.");Bukkit.getScheduler().runTask(this,()->{if(p.isOnline())p.kick(Component.text(kick));});playGlobalDeathSound();}
-    private void playGlobalDeathSound(){for(Player p:Bukkit.getOnlinePlayers())p.playSound(p.getLocation(),"minecraft:block.respawn_anchor.deplete",org.bukkit.SoundCategory.MASTER,0.9f,0.85f);}
-    @EventHandler(priority=EventPriority.HIGHEST)
-    public void onPreLogin(AsyncPlayerPreLoginEvent e){if(isEliminated(e.getUniqueId()))e.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED,getConfig().getString("messages.login-denied","You have been eliminated from this Hardcore server."));}
-    @EventHandler(priority=EventPriority.MONITOR)
-    public void onJoin(PlayerJoinEvent e){Player p=e.getPlayer();String path="players."+p.getUniqueId();if(records.getBoolean(path+".revive-pending",false)){records.set(path+".revive-pending",false);saveRecords();Bukkit.getScheduler().runTask(this,()->{if(!p.isOnline())return;p.setGameMode(GameMode.SURVIVAL);p.getInventory().clear();p.getInventory().setArmorContents(null);p.getInventory().setItemInOffHand(null);p.setTotalExperience(0);p.setLevel(0);p.setExp(0);p.setHealth(p.getMaxHealth());p.setFoodLevel(20);p.setSaturation(5.0f);p.setFireTicks(0);p.clearActivePotionEffects();Location s=storedRespawn(path);if(s!=null)p.teleport(s);});return;}if(!records.getBoolean(path+".intro-complete",false)&&!records.getBoolean(path+".eliminated",false))Bukkit.getScheduler().runTaskLater(this,()->startIntroduction(p),10L);}
+    private synchronized void saveRecords() {
+        if (records == null || recordsFile == null) return;
+        try {
+            records.save(recordsFile);
+        } catch (IOException e) {
+            getLogger().severe("Could not save eliminations.yml: " + e.getMessage());
+        }
+    }
 
-    private void startIntroduction(Player p){if(!p.isOnline())return;UUID id=p.getUniqueId();if(records.getBoolean("players."+id+".intro-complete",false))return;World limbo=Bukkit.getWorld(INTRO_WORLD_NAME);if(limbo==null){getLogger().severe("Intro limbo world is missing.");return;}resetIntroState(p);introPlayers.add(id);p.setGameMode(GameMode.ADVENTURE);p.setAllowFlight(false);p.setFlying(false);p.setWalkSpeed(0.0f);p.setFlySpeed(0.0f);p.setGravity(false);p.setVelocity(new Vector(0,0,0));p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS,20*60*10,10,false,false,false));p.teleport(new Location(limbo,INTRO_X,INTRO_Y,INTRO_Z,0.0f,0.0f));for(Player other:Bukkit.getOnlinePlayers())if(!other.getUniqueId().equals(id)){p.hidePlayer(this,other);other.hidePlayer(this,p);}p.stopSound(INTRO_MUSIC,org.bukkit.SoundCategory.MUSIC);p.stopSound(INTRO_AMBIENT_1,org.bukkit.SoundCategory.AMBIENT);p.stopSound(INTRO_AMBIENT_2,org.bukkit.SoundCategory.AMBIENT);p.playSound(p.getLocation(),INTRO_MUSIC,org.bukkit.SoundCategory.MUSIC,0.55f,0.72f);spawnIntroPrompt(p);startIntroParticles(p);startIntroAmbient(p);}
+    private void createIntroWorld() {
+        World w = Bukkit.getWorld(INTRO_WORLD_NAME);
+        if (w == null) {
+            w = WorldCreator.name(INTRO_WORLD_NAME)
+                    .type(WorldType.FLAT)
+                    .generateStructures(false)
+                    .generator(new VoidGenerator())
+                    .hardcore(false)
+                    .createWorld();
+        }
+        if (w == null) {
+            getLogger().severe("Could not create intro limbo world.");
+            return;
+        }
+        w.setDifficulty(Difficulty.PEACEFUL);
+        w.setTime(18000L);
+        w.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, false);
+        w.setGameRule(GameRule.DO_WEATHER_CYCLE, false);
+        w.setStorm(false);
+        w.setPVP(false);
+        w.setSpawnLocation(0, 120, 0);
+    }
 
-    private void spawnIntroPrompt(Player p){UUID id=p.getUniqueId();removeIntroPrompt(id);World w=Bukkit.getWorld(INTRO_WORLD_NAME);if(w==null)return;Location loc=new Location(w,INTRO_X,INTRO_Y+0.95,INTRO_Z+TEXT_DISTANCE);TextDisplay text=w.spawn(loc,TextDisplay.class,d->{d.text(Component.text("BEGIN",TextColor.color(245,245,245)).append(Component.text("\nLeft click to continue",TextColor.color(155,155,155))));d.setBillboard(TextDisplay.Billboard.CENTER);d.setAlignment(TextDisplay.TextAlignment.CENTER);d.setShadowed(false);d.setSeeThrough(false);d.setDefaultBackground(false);d.setLineWidth(240);d.setViewRange(20.0f);d.setTransformation(new Transformation(new Vector3f(0,0,0),new Quaternionf(),new Vector3f(1.35f,1.35f,1.35f),new Quaternionf()));});introTextDisplays.put(id,text);Interaction hit=w.spawn(new Location(w,INTRO_X,INTRO_Y+0.85,INTRO_Z+TEXT_DISTANCE),Interaction.class,i->{i.setInteractionWidth(3.5f);i.setInteractionHeight(2.2f);i.setResponsive(true);});introHitboxes.put(id,hit);}
+    private void cleanupPersistedIntroEntities() {
+        World w = Bukkit.getWorld(INTRO_WORLD_NAME);
+        if (w == null) return;
+        for (Entity entity : new ArrayList<>(w.getEntities())) {
+            if (entity instanceof TextDisplay || entity instanceof Interaction) entity.remove();
+        }
+    }
 
-    private void startIntroParticles(Player p){stopIntroParticles(p.getUniqueId());UUID id=p.getUniqueId();BukkitTask task=new BukkitRunnable(){@Override public void run(){if(!p.isOnline()||!introPlayers.contains(id)){cancel();introParticleTasks.remove(id);return;}Location b=p.getLocation();for(int i=0;i<28;i++){double x=b.getX()+(Math.random()*14.0-7.0),z=b.getZ()+(Math.random()*14.0-7.0),y=b.getY()+5.0+Math.random()*15.0;p.spawnParticle(Particle.WHITE_ASH,x,y,z,1,0.0,-0.08,0.0,0.0);}for(int i=0;i<7;i++){double x=b.getX()+(Math.random()*5.0-2.5),z=b.getZ()+2.0+(Math.random()*4.0-2.0),y=b.getY()+0.2+Math.random()*5.0;p.spawnParticle(Particle.SOUL_FIRE_FLAME,x,y,z,1,0.0,-0.06,0.0,0.0);}}}.runTaskTimer(this,0L,2L);introParticleTasks.put(id,task);}
-    private void stopIntroParticles(UUID id){BukkitTask t=introParticleTasks.remove(id);if(t!=null)t.cancel();}
-    private void startIntroAmbient(Player p){stopIntroAmbient(p.getUniqueId());UUID id=p.getUniqueId();BukkitTask t=new BukkitRunnable(){int ticks=0;@Override public void run(){if(!p.isOnline()||!introPlayers.contains(id)){cancel();introAmbientTasks.remove(id);return;}if(ticks%80==0){p.playSound(p.getLocation(),INTRO_AMBIENT_1,org.bukkit.SoundCategory.AMBIENT,0.35f,0.80f);p.playSound(p.getLocation(),INTRO_AMBIENT_2,org.bukkit.SoundCategory.AMBIENT,0.18f,0.72f);}ticks+=10;}}.runTaskTimer(this,0L,10L);introAmbientTasks.put(id,t);}
-    private void stopIntroAmbient(UUID id){BukkitTask t=introAmbientTasks.remove(id);if(t!=null)t.cancel();}
-    private boolean isIntroTarget(UUID id,Entity entity){Interaction hit=introHitboxes.get(id);return hit!=null&&hit.isValid()&&hit.getUniqueId().equals(entity.getUniqueId());}
-    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
-    public void onIntroEntityInteract(PlayerInteractEntityEvent e){Player p=e.getPlayer();if(!introPlayers.contains(p.getUniqueId()))return;if(isIntroTarget(p.getUniqueId(),e.getRightClicked()))e.setCancelled(true);}
-    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
-    public void onIntroEntityDamage(EntityDamageByEntityEvent e){if(!(e.getDamager() instanceof Player p))return;if(!introPlayers.contains(p.getUniqueId()))return;if(!isIntroTarget(p.getUniqueId(),e.getEntity()))return;e.setCancelled(true);openIntroductionBook(p);}
-    @EventHandler(priority=EventPriority.HIGHEST)
-    public void onIntroMove(PlayerMoveEvent e){Player p=e.getPlayer();if(!introPlayers.contains(p.getUniqueId())||e.getTo()==null)return;Location f=e.getFrom(),t=e.getTo();if(f.getX()!=t.getX()||f.getY()!=t.getY()||f.getZ()!=t.getZ()){Location fixed=f.clone();fixed.setYaw(t.getYaw());fixed.setPitch(t.getPitch());e.setTo(fixed);}}
-    @EventHandler public void onQuit(PlayerQuitEvent e){if(introPlayers.contains(e.getPlayer().getUniqueId()))resetIntroState(e.getPlayer());}
+    private boolean isIntroWorld(World w) {
+        return w != null && INTRO_WORLD_NAME.equals(w.getName());
+    }
 
-    private void openIntroductionBook(Player p){ItemStack book=new ItemStack(org.bukkit.Material.WRITTEN_BOOK);BookMeta meta=(BookMeta)book.getItemMeta();meta.title(Component.text("Survival Guide"));meta.author(Component.text("Hardcore SMP"));meta.addPages(Component.text("You have one life.\n\nBefore you enter the world, there are a few things you should know about surviving here."),Component.text("Keep food with you. Find shelter before night. Keep important items somewhere safe.\n\nThe world can be dangerous even when you think you're prepared."),Component.text("PvP is allowed. You can fight other players, form alliances, betray them, or stay alone.\n\nIf you die, you are eliminated."),Component.text("Explore carefully. Keep track of where you live. Carry only what you can afford to lose when travelling far from home."),Component.text("There are things in this world that are worth discovering. Not everything will be explained to you. Some things are better found yourself."),Component.text("When you're ready, enter the world.\n\n").append(Component.text("[ ENTER THE WORLD ]").color(TextColor.color(180,30,30)).clickEvent(ClickEvent.runCommand("/hardcore intro"))));book.setItemMeta(meta);p.openBook(book);}
-    private void completeIntroduction(Player p){UUID id=p.getUniqueId();if(!introPlayers.contains(id))return;removeIntroPrompt(id);introPlayers.remove(id);stopIntroParticles(id);stopIntroAmbient(id);p.stopSound(INTRO_MUSIC,org.bukkit.SoundCategory.MUSIC);p.stopSound(INTRO_AMBIENT_1,org.bukkit.SoundCategory.AMBIENT);p.stopSound(INTRO_AMBIENT_2,org.bukkit.SoundCategory.AMBIENT);p.removePotionEffect(PotionEffectType.SLOWNESS);p.setGravity(true);p.setWalkSpeed(0.2f);p.setFlySpeed(0.1f);p.setGameMode(GameMode.SURVIVAL);restoreVisibility(p);World target=null;if(getConfig().getBoolean("settings.intro-use-main-world-spawn",true)&&!Bukkit.getWorlds().isEmpty())target=Bukkit.getWorlds().get(0);if(target==null||isIntroWorld(target))for(World w:Bukkit.getWorlds())if(!isIntroWorld(w)){target=w;break;}if(target!=null)p.teleport(target.getSpawnLocation());records.set("players."+id+".intro-complete",true);records.set("players."+id+".intro-complete-time",Instant.now().toString());records.set("players."+id+".name",p.getName());saveRecords();p.sendMessage(Component.text("Welcome to the Hardcore SMP."));}
-    private void resetIntroState(Player p){UUID id=p.getUniqueId();introPlayers.remove(id);stopIntroParticles(id);stopIntroAmbient(id);removeIntroPrompt(id);p.stopSound(INTRO_MUSIC,org.bukkit.SoundCategory.MUSIC);p.stopSound(INTRO_AMBIENT_1,org.bukkit.SoundCategory.AMBIENT);p.stopSound(INTRO_AMBIENT_2,org.bukkit.SoundCategory.AMBIENT);p.removePotionEffect(PotionEffectType.SLOWNESS);p.setGravity(true);p.setWalkSpeed(0.2f);p.setFlySpeed(0.1f);p.setGameMode(GameMode.SURVIVAL);restoreVisibility(p);}
-    private void restoreVisibility(Player p){for(Player other:Bukkit.getOnlinePlayers())if(!other.getUniqueId().equals(p.getUniqueId())){p.showPlayer(this,other);other.showPlayer(this,p);}}
-    private void removeIntroPrompt(UUID id){TextDisplay text=introTextDisplays.remove(id);if(text!=null&&text.isValid())text.remove();Interaction hit=introHitboxes.remove(id);if(hit!=null&&hit.isValid())hit.remove();}
-    private void removeAllIntroDisplays(){for(UUID id:new ArrayList<>(introTextDisplays.keySet()))removeIntroPrompt(id);for(UUID id:new ArrayList<>(introHitboxes.keySet()))removeIntroPrompt(id);}
+    private void enforceWorldRules() {
+        for (World w : Bukkit.getWorlds()) {
+            if (!isIntroWorld(w)) {
+                if (getConfig().getBoolean("settings.force-hardcore-worlds", true)) w.setHardcore(true);
+                if (getConfig().getBoolean("settings.force-hard-difficulty", true)) w.setDifficulty(Difficulty.HARD);
+            }
+        }
+    }
 
-    private void openRules(Player p){ItemStack book=new ItemStack(org.bukkit.Material.WRITTEN_BOOK);BookMeta meta=(BookMeta)book.getItemMeta();meta.title(Component.text("Server Rules"));meta.author(Component.text("Hardcore SMP"));String[] pages={"You only get one life. If you die, you are permanently eliminated.\n\nPvP is allowed. Fight who you want, but remember that dying means losing your life.\n\nGriefing is allowed, but excessive destruction may result in punishment.","Stealing is allowed. Protect your valuables and don't leave important items exposed.\n\nHacked clients, unfair advantages, combat cheats, and exploits that provide an unreasonable advantage are forbidden.\n\nDo not abuse server-breaking exploits, crash exploits, or exploits that can damage the server.","Trash talk is fine, but harassment, threats, hate speech, and targeted bullying are not.\n\nNo alternate accounts to bypass an elimination or ban.\n\nDo not impersonate admins or abuse permissions.","Only authorized admins can revive eliminated players. Do not attempt to bypass an elimination yourself.\n\nDo not intentionally destroy massive areas of the world just to cause unnecessary lag or server performance issues.\n\nReport serious bugs or exploits to an admin instead of abusing them for an unfair advantage.","If something isn't specifically listed here but clearly damages the server or ruins the experience for others, admins may take action."};for(String page:pages)meta.addPage(page);book.setItemMeta(meta);p.openBook(book);}
+    private void restoreEliminationBans() {
+        org.bukkit.configuration.ConfigurationSection sec = records.getConfigurationSection("players");
+        if (sec == null) return;
+        for (String k : sec.getKeys(false)) {
+            if (records.getBoolean("players." + k + ".eliminated", false)) {
+                try {
+                    UUID id = UUID.fromString(k);
+                    Bukkit.getOfflinePlayer(id).ban(
+                            getConfig().getString("messages.death-ban-reason", "Hardcore death"),
+                            (Instant) null,
+                            "HardcoreCore"
+                    );
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+        }
+    }
 
-    @Override public boolean onCommand(org.bukkit.command.CommandSender sender,org.bukkit.command.Command command,String label,String[] args){if(command.getName().equalsIgnoreCase("rules")){if(!(sender instanceof Player p)){sender.sendMessage(Component.text("Only players can use /rules."));return true;}openRules(p);return true;}if(args.length>0&&args[0].equalsIgnoreCase("intro")){if(args.length==1){if(sender instanceof Player p)completeIntroduction(p);return true;}if(args.length==3&&args[1].equalsIgnoreCase("retry")){if(!sender.hasPermission("hardcore.admin")){sender.sendMessage(Component.text(getConfig().getString("messages.no-permission","You do not have permission to use this command.")));return true;}OfflinePlayer target=findTarget(args[2]);if(target==null){sender.sendMessage(Component.text(getConfig().getString("messages.player-not-found","Could not find that player.")));return true;}records.set("players."+target.getUniqueId()+".intro-complete",false);records.set("players."+target.getUniqueId()+".intro-complete-time",null);records.set("players."+target.getUniqueId()+".name",target.getName());saveRecords();if(target.isOnline()){Player p=(Player)target;resetIntroState(p);startIntroduction(p);sender.sendMessage(Component.text("Started the introduction again for "+p.getName()+"."));}else sender.sendMessage(Component.text("Reset the introduction for "+target.getName()+". It will start when they join."));return true;}}
-        if(!sender.hasPermission("hardcore.admin")){sender.sendMessage(Component.text(getConfig().getString("messages.no-permission","You do not have permission to use this command.")));return true;}if(args.length==0){sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));sender.sendMessage(Component.text("/hardcore death <player>"));sender.sendMessage(Component.text("/hardcore intro retry <player>"));return true;}if(args[0].equalsIgnoreCase("revive"))revive(sender,args);else if(args[0].equalsIgnoreCase("death"))deathReport(sender,args);else sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));return true;}
-    private void revive(org.bukkit.command.CommandSender s,String[] a){if(a.length<4||!a[2].equalsIgnoreCase("confirm")){s.sendMessage(Component.text(getConfig().getString("messages.revive-usage","Usage: /hardcore revive <player> confirm <reason>")));return;}OfflinePlayer t=findTarget(a[1]);if(t==null){s.sendMessage(Component.text(getConfig().getString("messages.player-not-found","Could not find that player.")));return;}UUID id=t.getUniqueId();if(!isEliminated(id)){s.sendMessage(Component.text(getConfig().getString("messages.not-eliminated","%player% is not currently eliminated by HardcoreCore.").replace("%player%",t.getName())));return;}String reason=String.join(" ",Arrays.copyOfRange(a,3,a.length)).trim();if(reason.isBlank()&&getConfig().getBoolean("settings.require-revive-reason",true)){s.sendMessage(Component.text(getConfig().getString("messages.revive-usage","Usage: /hardcore revive <player> confirm <reason>")));return;}String path="players."+id;records.set(path+".eliminated",false);records.set(path+".revived",true);records.set(path+".revived-time",Instant.now().toString());records.set(path+".revived-by",s.getName());records.set(path+".revive-reason",reason);records.set(path+".revive-pending",true);saveRecords();Bukkit.getBanList(BanListType.PROFILE).pardon(id.toString());s.sendMessage(Component.text(getConfig().getString("messages.revive-success","Revived %player%. Their death remains final and no items/XP were restored.").replace("%player%",t.getName())));getLogger().info("ADMIN REVIVAL | player="+t.getName()+" uuid="+id+" by="+s.getName()+" reason="+reason);}
-    private void deathReport(org.bukkit.command.CommandSender s,String[] a){if(a.length!=2){s.sendMessage(Component.text(getConfig().getString("messages.death-report-usage","Usage: /hardcore death <player>")));return;}OfflinePlayer t=findTarget(a[1]);if(t==null||records.getConfigurationSection("players."+t.getUniqueId())==null){s.sendMessage(Component.text(getConfig().getString("messages.death-not-found","No Hardcore elimination record was found for %player%.").replace("%player%",a[1])));return;}String p="players."+t.getUniqueId();s.sendMessage(Component.text("===== Hardcore Death Report ====="));s.sendMessage(Component.text("Player: "+records.getString(p+".name",t.getName())));s.sendMessage(Component.text("UUID: "+t.getUniqueId()));s.sendMessage(Component.text("Status: "+(records.getBoolean(p+".eliminated",false)?"ELIMINATED":"REVIVED")));s.sendMessage(Component.text("Time: "+records.getString(p+".death-time","unknown")));s.sendMessage(Component.text("Cause: "+records.getString(p+".cause","unknown")));s.sendMessage(Component.text("Killer: "+records.getString(p+".killer","none")));s.sendMessage(Component.text("Location: "+records.getString(p+".world","unknown")+" "+Math.round(records.getDouble(p+".x"))+", "+Math.round(records.getDouble(p+".y"))+", "+Math.round(records.getDouble(p+".z"))));if(records.getBoolean(p+".revived",false)){s.sendMessage(Component.text("Revived by: "+records.getString(p+".revived-by","unknown")));s.sendMessage(Component.text("Revive reason: "+records.getString(p+".revive-reason","unknown")));}}
-    private Location storedRespawn(String path){String wn=records.getString(path+".respawn-world");if(wn==null)return Bukkit.getWorlds().isEmpty()?null:Bukkit.getWorlds().get(0).getSpawnLocation();World w=Bukkit.getWorld(wn);if(w==null)return Bukkit.getWorlds().isEmpty()?null:Bukkit.getWorlds().get(0).getSpawnLocation();return new Location(w,records.getDouble(path+".respawn-x"),records.getDouble(path+".respawn-y"),records.getDouble(path+".respawn-z"));}
-    private boolean isEliminated(UUID id){return records!=null&&records.getBoolean("players."+id+".eliminated",false);}
-    private OfflinePlayer findTarget(String name){Player p=Bukkit.getPlayerExact(name);if(p!=null)return p;org.bukkit.configuration.ConfigurationSection sec=records.getConfigurationSection("players");if(sec!=null)for(String k:sec.getKeys(false)){String n=records.getString("players."+k+".name");if(n!=null&&n.equalsIgnoreCase(name))try{return Bukkit.getOfflinePlayer(UUID.fromString(k));}catch(IllegalArgumentException ignored){}}OfflinePlayer o=Bukkit.getOfflinePlayer(name);return o.hasPlayedBefore()?o:null;}
-    @Override public List<String> onTabComplete(org.bukkit.command.CommandSender s,org.bukkit.command.Command c,String alias,String[] a){if(!s.hasPermission("hardcore.admin")||!c.getName().equalsIgnoreCase("hardcore"))return Collections.emptyList();if(a.length==1)return partial(List.of("revive","death","intro"),a[0]);if(a.length==2&&a[0].equalsIgnoreCase("intro"))return partial(List.of("retry"),a[1]);if(a.length==3&&a[0].equalsIgnoreCase("intro")&&a[1].equalsIgnoreCase("retry"))return partial(allKnownNames(),a[2]);if(a.length==2&&(a[0].equalsIgnoreCase("revive")||a[0].equalsIgnoreCase("death")))return partial(allKnownNames(),a[1]);if(a.length==3&&a[0].equalsIgnoreCase("revive"))return partial(List.of("confirm"),a[2]);return Collections.emptyList();}
-    private List<String> allKnownNames(){List<String> n=new ArrayList<>();for(Player p:Bukkit.getOnlinePlayers())if(!n.contains(p.getName()))n.add(p.getName());org.bukkit.configuration.ConfigurationSection sec=records.getConfigurationSection("players");if(sec!=null)for(String k:sec.getKeys(false)){String name=records.getString("players."+k+".name");if(name!=null&&!n.contains(name))n.add(name);}return n;}
-    private List<String> partial(List<String> opts,String in){List<String> out=new ArrayList<>();for(String x:opts)if(x.toLowerCase(Locale.ROOT).startsWith(in.toLowerCase(Locale.ROOT)))out.add(x);Collections.sort(out);return out;}
-    private static final class VoidGenerator extends ChunkGenerator { @Override public void generateNoise(org.bukkit.generator.WorldInfo worldInfo,Random random,int chunkX,int chunkZ,ChunkData chunkData){} @Override public void generateSurface(org.bukkit.generator.WorldInfo worldInfo,Random random,int chunkX,int chunkZ,ChunkData chunkData){} @Override public int getBaseHeight(org.bukkit.generator.WorldInfo worldInfo,Random random,int x,int z,org.bukkit.HeightMap heightMap){return worldInfo.getMinHeight();} }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onWorldLoad(WorldLoadEvent e) {
+        World w = e.getWorld();
+        if (isIntroWorld(w)) return;
+        if (getConfig().getBoolean("settings.force-hardcore-worlds", true)) w.setHardcore(true);
+        if (getConfig().getBoolean("settings.force-hard-difficulty", true)) w.setDifficulty(Difficulty.HARD);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDeath(PlayerDeathEvent e) {
+        Component vanilla = e.deathMessage();
+        if (vanilla != null) e.deathMessage(vanilla.color(TextColor.color(255, 45, 45)));
+        Player p = e.getPlayer();
+        UUID id = p.getUniqueId();
+        if (isEliminated(id)) return;
+        String path = "players." + id;
+        Location death = p.getLocation().clone();
+        Location respawn = p.getRespawnLocation();
+        Player killer = p.getKiller();
+        records.set(path + ".name", p.getName());
+        records.set(path + ".uuid", id.toString());
+        records.set(path + ".eliminated", true);
+        records.set(path + ".revived", false);
+        records.set(path + ".death-time", Instant.now().toString());
+        records.set(path + ".cause", killer == null ? "NON_PLAYER" : "PLAYER");
+        records.set(path + ".killer", killer == null ? null : killer.getName());
+        records.set(path + ".world", death.getWorld() == null ? null : death.getWorld().getName());
+        records.set(path + ".x", death.getX());
+        records.set(path + ".y", death.getY());
+        records.set(path + ".z", death.getZ());
+        records.set(path + ".respawn-world", respawn == null || respawn.getWorld() == null ? null : respawn.getWorld().getName());
+        records.set(path + ".respawn-x", respawn == null ? null : respawn.getX());
+        records.set(path + ".respawn-y", respawn == null ? null : respawn.getY());
+        records.set(path + ".respawn-z", respawn == null ? null : respawn.getZ());
+        saveRecords();
+        p.ban(getConfig().getString("messages.death-ban-reason", "Hardcore death"), (Instant) null, "HardcoreCore");
+        String kick = getConfig().getString("messages.death-kick", "You died. You have been permanently eliminated from this Hardcore server.");
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (p.isOnline()) p.kick(Component.text(kick));
+        });
+        playGlobalDeathSound();
+    }
+
+    private void playGlobalDeathSound() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.playSound(p.getLocation(), "minecraft:block.respawn_anchor.deplete", org.bukkit.SoundCategory.MASTER, 0.9f, 0.85f);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPreLogin(AsyncPlayerPreLoginEvent e) {
+        if (isEliminated(e.getUniqueId())) {
+            e.disallow(
+                    AsyncPlayerPreLoginEvent.Result.KICK_BANNED,
+                    getConfig().getString("messages.login-denied", "You have been eliminated from this Hardcore server.")
+            );
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onJoin(PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        String path = "players." + p.getUniqueId();
+        if (records.getBoolean(path + ".revive-pending", false)) {
+            records.set(path + ".revive-pending", false);
+            saveRecords();
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (!p.isOnline()) return;
+                p.setGameMode(GameMode.SURVIVAL);
+                p.getInventory().clear();
+                p.getInventory().setArmorContents(null);
+                p.getInventory().setItemInOffHand(null);
+                p.setTotalExperience(0);
+                p.setLevel(0);
+                p.setExp(0);
+                p.setHealth(p.getMaxHealth());
+                p.setFoodLevel(20);
+                p.setSaturation(5.0f);
+                p.setFireTicks(0);
+                p.clearActivePotionEffects();
+                Location s = storedRespawn(path);
+                if (s != null) p.teleport(s);
+            });
+            return;
+        }
+        if (!records.getBoolean(path + ".intro-complete", false) && !records.getBoolean(path + ".eliminated", false)) {
+            Bukkit.getScheduler().runTaskLater(this, () -> startIntroduction(p), 10L);
+        }
+    }
+
+    private int allocateIntroInstanceSlot(UUID id) {
+        Integer existing = introInstanceSlots.get(id);
+        if (existing != null) return existing;
+        int slot = freeIntroInstanceSlots.isEmpty() ? nextIntroInstanceSlot++ : freeIntroInstanceSlots.pollFirst();
+        introInstanceSlots.put(id, slot);
+        return slot;
+    }
+
+    private void releaseIntroInstanceSlot(UUID id) {
+        Integer slot = introInstanceSlots.remove(id);
+        if (slot != null) freeIntroInstanceSlots.add(slot);
+    }
+
+    private Location introPlayerLocation(UUID id) {
+        int slot = allocateIntroInstanceSlot(id);
+        double x = (double) slot * INTRO_INSTANCE_SPACING + 0.5;
+        return new Location(Bukkit.getWorld(INTRO_WORLD_NAME), x, INTRO_Y, INTRO_Z, 0.0f, 0.0f);
+    }
+
+    private Location introTextLocation(UUID id) {
+        return introPlayerLocation(id).clone().add(0.0, 0.95, TEXT_DISTANCE);
+    }
+
+    private Location introHitboxLocation(UUID id) {
+        return introPlayerLocation(id).clone().add(0.0, 0.85, TEXT_DISTANCE);
+    }
+
+    private void startIntroduction(Player p) {
+        if (!p.isOnline()) return;
+        UUID id = p.getUniqueId();
+        if (records.getBoolean("players." + id + ".intro-complete", false)) return;
+        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);
+        if (limbo == null) {
+            getLogger().severe("Intro limbo world is missing.");
+            return;
+        }
+
+        resetIntroState(p);
+        introPlayers.add(id);
+        allocateIntroInstanceSlot(id);
+
+        p.setGameMode(GameMode.ADVENTURE);
+        p.setAllowFlight(false);
+        p.setFlying(false);
+        p.setWalkSpeed(0.0f);
+        p.setFlySpeed(0.0f);
+        p.setGravity(false);
+        p.setVelocity(new Vector(0, 0, 0));
+        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));
+        p.teleport(introPlayerLocation(id));
+
+        for (Player other : Bukkit.getOnlinePlayers()) {
+            if (!other.getUniqueId().equals(id)) {
+                p.hidePlayer(this, other);
+                other.hidePlayer(this, p);
+            }
+        }
+
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.playSound(p.getLocation(), INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC, 0.55f, 0.72f);
+        spawnIntroPrompt(p);
+        startIntroParticles(p);
+        startIntroAmbient(p);
+    }
+
+    private void spawnIntroPrompt(Player p) {
+        UUID id = p.getUniqueId();
+        removeIntroPrompt(id);
+        World w = Bukkit.getWorld(INTRO_WORLD_NAME);
+        if (w == null) return;
+
+        TextDisplay text = w.spawn(introTextLocation(id), TextDisplay.class, d -> {
+            d.text(Component.text("BEGIN", TextColor.color(245, 245, 245))
+                    .append(Component.text("\nLeft click to continue", TextColor.color(155, 155, 155))));
+            d.setBillboard(TextDisplay.Billboard.CENTER);
+            d.setAlignment(TextDisplay.TextAlignment.CENTER);
+            d.setShadowed(false);
+            d.setSeeThrough(false);
+            d.setDefaultBackground(false);
+            d.setLineWidth(240);
+            d.setViewRange(20.0f);
+            d.setTransformation(new Transformation(
+                    new Vector3f(0, 0, 0), new Quaternionf(),
+                    new Vector3f(1.35f, 1.35f, 1.35f), new Quaternionf()
+            ));
+        });
+        introTextDisplays.put(id, text);
+
+        Interaction hit = w.spawn(introHitboxLocation(id), Interaction.class, i -> {
+            i.setInteractionWidth(3.5f);
+            i.setInteractionHeight(2.2f);
+            i.setResponsive(true);
+        });
+        introHitboxes.put(id, hit);
+    }
+
+    private void startIntroParticles(Player p) {
+        stopIntroParticles(p.getUniqueId());
+        UUID id = p.getUniqueId();
+        BukkitTask task = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!p.isOnline() || !introPlayers.contains(id)) {
+                    cancel();
+                    introParticleTasks.remove(id);
+                    return;
+                }
+                Location b = p.getLocation();
+                for (int i = 0; i < 28; i++) {
+                    double x = b.getX() + (Math.random() * 14.0 - 7.0);
+                    double z = b.getZ() + (Math.random() * 14.0 - 7.0);
+                    double y = b.getY() + 5.0 + Math.random() * 15.0;
+                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.08, 0.0, 0.0);
+                }
+                for (int i = 0; i < 7; i++) {
+                    double x = b.getX() + (Math.random() * 5.0 - 2.5);
+                    double z = b.getZ() + 2.0 + (Math.random() * 4.0 - 2.0);
+                    double y = b.getY() + 0.2 + Math.random() * 5.0;
+                    p.spawnParticle(Particle.SOUL_FIRE_FLAME, x, y, z, 1, 0.0, -0.06, 0.0, 0.0);
+                }
+            }
+        }.runTaskTimer(this, 0L, 2L);
+        introParticleTasks.put(id, task);
+    }
+
+    private void stopIntroParticles(UUID id) {
+        BukkitTask t = introParticleTasks.remove(id);
+        if (t != null) t.cancel();
+    }
+
+    private void startIntroAmbient(Player p) {
+        stopIntroAmbient(p.getUniqueId());
+        UUID id = p.getUniqueId();
+        BukkitTask t = new BukkitRunnable() {
+            int ticks = 0;
+            @Override
+            public void run() {
+                if (!p.isOnline() || !introPlayers.contains(id)) {
+                    cancel();
+                    introAmbientTasks.remove(id);
+                    return;
+                }
+                if (ticks % 80 == 0) {
+                    p.playSound(p.getLocation(), INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT, 0.35f, 0.80f);
+                    p.playSound(p.getLocation(), INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT, 0.18f, 0.72f);
+                }
+                ticks += 10;
+            }
+        }.runTaskTimer(this, 0L, 10L);
+        introAmbientTasks.put(id, t);
+    }
+
+    private void stopIntroAmbient(UUID id) {
+        BukkitTask t = introAmbientTasks.remove(id);
+        if (t != null) t.cancel();
+    }
+
+    private boolean isIntroTarget(UUID id, Entity entity) {
+        Interaction hit = introHitboxes.get(id);
+        return hit != null && hit.isValid() && hit.getUniqueId().equals(entity.getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onIntroEntityInteract(PlayerInteractEntityEvent e) {
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (isIntroTarget(p.getUniqueId(), e.getRightClicked())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onIntroEntityDamage(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player p)) return;
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (!isIntroTarget(p.getUniqueId(), e.getEntity())) return;
+        e.setCancelled(true);
+        openIntroductionBook(p);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onIntroMove(PlayerMoveEvent e) {
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId()) || e.getTo() == null) return;
+        Location f = e.getFrom();
+        Location t = e.getTo();
+        if (f.getX() != t.getX() || f.getY() != t.getY() || f.getZ() != t.getZ()) {
+            Location fixed = f.clone();
+            fixed.setYaw(t.getYaw());
+            fixed.setPitch(t.getPitch());
+            e.setTo(fixed);
+        }
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        if (introPlayers.contains(e.getPlayer().getUniqueId())) resetIntroState(e.getPlayer());
+    }
+
+    private void openIntroductionBook(Player p) {
+        ItemStack book = new ItemStack(org.bukkit.Material.WRITTEN_BOOK);
+        BookMeta meta = (BookMeta) book.getItemMeta();
+        meta.title(Component.text("Survival Guide"));
+        meta.author(Component.text("Hardcore SMP"));
+        meta.addPages(
+                Component.text("You have one life.\n\nBefore you enter the world, there are a few things you should know about surviving here."),
+                Component.text("Keep food with you. Find shelter before night. Keep important items somewhere safe.\n\nThe world can be dangerous even when you think you're prepared."),
+                Component.text("PvP is allowed. You can fight other players, form alliances, betray them, or stay alone.\n\nIf you die, you are eliminated."),
+                Component.text("Explore carefully. Keep track of where you live. Carry only what you can afford to lose when travelling far from home."),
+                Component.text("There are things in this world that are worth discovering. Not everything will be explained to you. Some things are better found yourself."),
+                Component.text("When you're ready, enter the world.\n\n")
+                        .append(Component.text("[ ENTER THE WORLD ]")
+                                .color(TextColor.color(180, 30, 30))
+                                .clickEvent(ClickEvent.runCommand("/hardcore intro")))
+        );
+        book.setItemMeta(meta);
+        p.openBook(book);
+    }
+
+    private void completeIntroduction(Player p) {
+        UUID id = p.getUniqueId();
+        if (!introPlayers.contains(id)) return;
+        removeIntroPrompt(id);
+        introPlayers.remove(id);
+        stopIntroParticles(id);
+        stopIntroAmbient(id);
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.removePotionEffect(PotionEffectType.SLOWNESS);
+        p.setGravity(true);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
+        p.setGameMode(GameMode.SURVIVAL);
+        restoreVisibility(p);
+        releaseIntroInstanceSlot(id);
+
+        World target = null;
+        if (getConfig().getBoolean("settings.intro-use-main-world-spawn", true) && !Bukkit.getWorlds().isEmpty()) {
+            target = Bukkit.getWorlds().get(0);
+        }
+        if (target == null || isIntroWorld(target)) {
+            for (World w : Bukkit.getWorlds()) {
+                if (!isIntroWorld(w)) {
+                    target = w;
+                    break;
+                }
+            }
+        }
+        if (target != null) p.teleport(target.getSpawnLocation());
+        records.set("players." + id + ".intro-complete", true);
+        records.set("players." + id + ".intro-complete-time", Instant.now().toString());
+        records.set("players." + id + ".name", p.getName());
+        saveRecords();
+        p.sendMessage(Component.text("Welcome to the Hardcore SMP."));
+    }
+
+    private void resetIntroState(Player p) {
+        UUID id = p.getUniqueId();
+        introPlayers.remove(id);
+        stopIntroParticles(id);
+        stopIntroAmbient(id);
+        removeIntroPrompt(id);
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.removePotionEffect(PotionEffectType.SLOWNESS);
+        p.setGravity(true);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
+        p.setGameMode(GameMode.SURVIVAL);
+        restoreVisibility(p);
+        releaseIntroInstanceSlot(id);
+    }
+
+    private void restoreVisibility(Player p) {
+        for (Player other : Bukkit.getOnlinePlayers()) {
+            if (!other.getUniqueId().equals(p.getUniqueId())) {
+                p.showPlayer(this, other);
+                other.showPlayer(this, p);
+            }
+        }
+    }
+
+    private void removeIntroPrompt(UUID id) {
+        TextDisplay text = introTextDisplays.remove(id);
+        if (text != null && text.isValid()) text.remove();
+        Interaction hit = introHitboxes.remove(id);
+        if (hit != null && hit.isValid()) hit.remove();
+    }
+
+    private void removeAllIntroDisplays() {
+        for (UUID id : new ArrayList<>(introTextDisplays.keySet())) removeIntroPrompt(id);
+        for (UUID id : new ArrayList<>(introHitboxes.keySet())) removeIntroPrompt(id);
+    }
+
+    private void openRules(Player p) {
+        ItemStack book = new ItemStack(org.bukkit.Material.WRITTEN_BOOK);
+        BookMeta meta = (BookMeta) book.getItemMeta();
+        meta.title(Component.text("Server Rules"));
+        meta.author(Component.text("Hardcore SMP"));
+        String[] pages = {
+                "You only get one life. If you die, you are permanently eliminated.\n\nPvP is allowed. Fight who you want, but remember that dying means losing your life.\n\nGriefing is allowed, but excessive destruction may result in punishment.",
+                "Stealing is allowed. Protect your valuables and don't leave important items exposed.\n\nHacked clients, unfair advantages, combat cheats, and exploits that provide an unreasonable advantage are forbidden.\n\nDo not abuse server-breaking exploits, crash exploits, or exploits that can damage the server.",
+                "Trash talk is fine, but harassment, threats, hate speech, and targeted bullying are not.\n\nNo alternate accounts to bypass an elimination or ban.\n\nDo not impersonate admins or abuse permissions.",
+                "Only authorized admins can revive eliminated players. Do not attempt to bypass an elimination yourself.\n\nDo not intentionally destroy massive areas of the world just to cause unnecessary lag or server performance issues.\n\nReport serious bugs or exploits to an admin instead of abusing them for an unfair advantage.",
+                "If something isn't specifically listed here but clearly damages the server or ruins the experience for others, admins may take action."
+        };
+        for (String page : pages) meta.addPage(page);
+        book.setItemMeta(meta);
+        p.openBook(book);
+    }
+
+    @Override
+    public boolean onCommand(org.bukkit.command.CommandSender sender, org.bukkit.command.Command command, String label, String[] args) {
+        if (command.getName().equalsIgnoreCase("rules")) {
+            if (!(sender instanceof Player p)) {
+                sender.sendMessage(Component.text("Only players can use /rules."));
+                return true;
+            }
+            openRules(p);
+            return true;
+        }
+
+        if (args.length > 0 && args[0].equalsIgnoreCase("intro")) {
+            if (args.length == 1) {
+                if (sender instanceof Player p) completeIntroduction(p);
+                return true;
+            }
+            if (args.length == 3 && args[1].equalsIgnoreCase("retry")) {
+                if (!sender.hasPermission("hardcore.admin")) {
+                    sender.sendMessage(Component.text(getConfig().getString("messages.no-permission", "You do not have permission to use this command.")));
+                    return true;
+                }
+                OfflinePlayer target = findTarget(args[2]);
+                if (target == null) {
+                    sender.sendMessage(Component.text(getConfig().getString("messages.player-not-found", "Could not find that player.")));
+                    return true;
+                }
+                records.set("players." + target.getUniqueId() + ".intro-complete", false);
+                records.set("players." + target.getUniqueId() + ".intro-complete-time", null);
+                records.set("players." + target.getUniqueId() + ".name", target.getName());
+                saveRecords();
+                if (target.isOnline()) {
+                    Player p = (Player) target;
+                    resetIntroState(p);
+                    startIntroduction(p);
+                    sender.sendMessage(Component.text("Started the introduction again for " + p.getName() + "."));
+                } else {
+                    sender.sendMessage(Component.text("Reset the introduction for " + target.getName() + ". It will start when they join."));
+                }
+                return true;
+            }
+        }
+
+        if (!sender.hasPermission("hardcore.admin")) {
+            sender.sendMessage(Component.text(getConfig().getString("messages.no-permission", "You do not have permission to use this command.")));
+            return true;
+        }
+        if (args.length == 0) {
+            sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));
+            sender.sendMessage(Component.text("/hardcore death <player>"));
+            sender.sendMessage(Component.text("/hardcore intro retry <player>"));
+            return true;
+        }
+        if (args[0].equalsIgnoreCase("revive")) revive(sender, args);
+        else if (args[0].equalsIgnoreCase("death")) deathReport(sender, args);
+        else sender.sendMessage(Component.text("/hardcore revive <player> confirm <reason>"));
+        return true;
+    }
+
+    private void revive(org.bukkit.command.CommandSender s, String[] a) {
+        if (a.length < 4 || !a[2].equalsIgnoreCase("confirm")) {
+            s.sendMessage(Component.text(getConfig().getString("messages.revive-usage", "Usage: /hardcore revive <player> confirm <reason>")));
+            return;
+        }
+        OfflinePlayer t = findTarget(a[1]);
+        if (t == null) {
+            s.sendMessage(Component.text(getConfig().getString("messages.player-not-found", "Could not find that player.")));
+            return;
+        }
+        UUID id = t.getUniqueId();
+        if (!isEliminated(id)) {
+            s.sendMessage(Component.text(getConfig().getString("messages.not-eliminated", "%player% is not currently eliminated by HardcoreCore.").replace("%player%", t.getName())));
+            return;
+        }
+        String reason = String.join(" ", Arrays.copyOfRange(a, 3, a.length)).trim();
+        if (reason.isBlank() && getConfig().getBoolean("settings.require-revive-reason", true)) {
+            s.sendMessage(Component.text(getConfig().getString("messages.revive-usage", "Usage: /hardcore revive <player> confirm <reason>")));
+            return;
+        }
+        String path = "players." + id;
+        records.set(path + ".eliminated", false);
+        records.set(path + ".revived", true);
+        records.set(path + ".revived-time", Instant.now().toString());
+        records.set(path + ".revived-by", s.getName());
+        records.set(path + ".revive-reason", reason);
+        records.set(path + ".revive-pending", true);
+        saveRecords();
+        Bukkit.getBanList(BanListType.PROFILE).pardon(id.toString());
+        s.sendMessage(Component.text(getConfig().getString("messages.revive-success", "Revived %player%. Their death remains final and no items/XP were restored.").replace("%player%", t.getName())));
+        getLogger().info("ADMIN REVIVAL | player=" + t.getName() + " uuid=" + id + " by=" + s.getName() + " reason=" + reason);
+    }
+
+    private void deathReport(org.bukkit.command.CommandSender s, String[] a) {
+        if (a.length != 2) {
+            s.sendMessage(Component.text(getConfig().getString("messages.death-report-usage", "Usage: /hardcore death <player>")));
+            return;
+        }
+        OfflinePlayer t = findTarget(a[1]);
+        if (t == null || records.getConfigurationSection("players." + t.getUniqueId()) == null) {
+            s.sendMessage(Component.text(getConfig().getString("messages.death-not-found", "No Hardcore elimination record was found for %player%.").replace("%player%", a[1])));
+            return;
+        }
+        String p = "players." + t.getUniqueId();
+        s.sendMessage(Component.text("===== Hardcore Death Report ====="));
+        s.sendMessage(Component.text("Player: " + records.getString(p + ".name", t.getName())));
+        s.sendMessage(Component.text("UUID: " + t.getUniqueId()));
+        s.sendMessage(Component.text("Status: " + (records.getBoolean(p + ".eliminated", false) ? "ELIMINATED" : "REVIVED")));
+        s.sendMessage(Component.text("Time: " + records.getString(p + ".death-time", "unknown")));
+        s.sendMessage(Component.text("Cause: " + records.getString(p + ".cause", "unknown")));
+        s.sendMessage(Component.text("Killer: " + records.getString(p + ".killer", "none")));
+        s.sendMessage(Component.text("Location: " + records.getString(p + ".world", "unknown") + " " + Math.round(records.getDouble(p + ".x")) + ", " + Math.round(records.getDouble(p + ".y")) + ", " + Math.round(records.getDouble(p + ".z"))));
+        if (records.getBoolean(p + ".revived", false)) {
+            s.sendMessage(Component.text("Revived by: " + records.getString(p + ".revived-by", "unknown")));
+            s.sendMessage(Component.text("Revive reason: " + records.getString(p + ".revive-reason", "unknown")));
+        }
+    }
+
+    private Location storedRespawn(String path) {
+        String wn = records.getString(path + ".respawn-world");
+        if (wn == null) return Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getSpawnLocation();
+        World w = Bukkit.getWorld(wn);
+        if (w == null) return Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getSpawnLocation();
+        return new Location(w, records.getDouble(path + ".respawn-x"), records.getDouble(path + ".respawn-y"), records.getDouble(path + ".respawn-z"));
+    }
+
+    private boolean isEliminated(UUID id) {
+        return records != null && records.getBoolean("players." + id + ".eliminated", false);
+    }
+
+    private OfflinePlayer findTarget(String name) {
+        Player p = Bukkit.getPlayerExact(name);
+        if (p != null) return p;
+        org.bukkit.configuration.ConfigurationSection sec = records.getConfigurationSection("players");
+        if (sec != null) {
+            for (String k : sec.getKeys(false)) {
+                String n = records.getString("players." + k + ".name");
+                if (n != null && n.equalsIgnoreCase(name)) {
+                    try {
+                        return Bukkit.getOfflinePlayer(UUID.fromString(k));
+                    } catch (IllegalArgumentException ignored) {
+                    }
+                }
+            }
+        }
+        OfflinePlayer o = Bukkit.getOfflinePlayer(name);
+        return o.hasPlayedBefore() ? o : null;
+    }
+
+    @Override
+    public List<String> onTabComplete(org.bukkit.command.CommandSender s, org.bukkit.command.Command c, String alias, String[] a) {
+        if (!s.hasPermission("hardcore.admin") || !c.getName().equalsIgnoreCase("hardcore")) return Collections.emptyList();
+        if (a.length == 1) return partial(List.of("revive", "death", "intro"), a[0]);
+        if (a.length == 2 && a[0].equalsIgnoreCase("intro")) return partial(List.of("retry"), a[1]);
+        if (a.length == 3 && a[0].equalsIgnoreCase("intro") && a[1].equalsIgnoreCase("retry")) return partial(allKnownNames(), a[2]);
+        if (a.length == 2 && (a[0].equalsIgnoreCase("revive") || a[0].equalsIgnoreCase("death"))) return partial(allKnownNames(), a[1]);
+        if (a.length == 3 && a[0].equalsIgnoreCase("revive")) return partial(List.of("confirm"), a[2]);
+        return Collections.emptyList();
+    }
+
+    private List<String> allKnownNames() {
+        List<String> n = new ArrayList<>();
+        for (Player p : Bukkit.getOnlinePlayers()) if (!n.contains(p.getName())) n.add(p.getName());
+        org.bukkit.configuration.ConfigurationSection sec = records.getConfigurationSection("players");
+        if (sec != null) {
+            for (String k : sec.getKeys(false)) {
+                String name = records.getString("players." + k + ".name");
+                if (name != null && !n.contains(name)) n.add(name);
+            }
+        }
+        return n;
+    }
+
+    private List<String> partial(List<String> opts, String in) {
+        List<String> out = new ArrayList<>();
+        for (String x : opts) if (x.toLowerCase(Locale.ROOT).startsWith(in.toLowerCase(Locale.ROOT))) out.add(x);
+        Collections.sort(out);
+        return out;
+    }
+
+    private static final class VoidGenerator extends ChunkGenerator {
+        @Override
+        public void generateNoise(org.bukkit.generator.WorldInfo worldInfo, Random random, int chunkX, int chunkZ, ChunkData chunkData) {
+        }
+
+        @Override
+        public void generateSurface(org.bukkit.generator.WorldInfo worldInfo, Random random, int chunkX, int chunkZ, ChunkData chunkData) {
+        }
+
+        @Override
+        public int getBaseHeight(org.bukkit.generator.WorldInfo worldInfo, Random random, int x, int z, org.bukkit.HeightMap heightMap) {
+            return worldInfo.getMinHeight();
+        }
+    }
 }
