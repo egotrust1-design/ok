@@ -34,18 +34,90 @@ def replace_method(src, signature, body):
                     return src[:start] + body + src[i + 1:]
     raise SystemExit(f'Unclosed method: {signature}')
 
-# Gravity is disabled in the intro, so permit flight for the duration of the
-# limbo state. This prevents Paper's anti-fly check from kicking a stationary
-# player who is deliberately hovering in the void.
+# Required import and small state sets used by the intro handlers.
+if 'import org.bukkit.event.player.PlayerInteractEvent;' not in s:
+    s = s.replace('import org.bukkit.event.player.PlayerInteractEntityEvent;\n', 'import org.bukkit.event.player.PlayerInteractEntityEvent;\nimport org.bukkit.event.player.PlayerInteractEvent;\n', 1)
+if 'private final Set<UUID> introBookQueued' not in s:
+    s = s.replace('    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n', '    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n    private final Set<UUID> introBookQueued = new HashSet<>();\n    private final Set<UUID> introTransitioning = new HashSet<>();\n', 1)
+
+# Gravity is disabled in the intro, so allow flight permission there to stop
+# Paper's anti-fly check from kicking a stationary player in the void.
 s = s.replace(
     '        p.setAllowFlight(false);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
     '        p.setAllowFlight(true);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
     1
 )
 
-# Prevent a player who was kicked/disconnected during the sky drop from
-# reconnecting in mid-air and dying. A pending transition is recovered to
-# a safe ground position on the next join.
+# Darkness while the player is still in the intro.
+needle = '        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));\n'
+if needle in s and 'p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS' not in s:
+    s = s.replace(needle, needle + '        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n', 1)
+
+# Lighter particles for simultaneous players.
+particle = '''    private void startIntroParticles(Player p) {
+        stopIntroParticles(p.getUniqueId());
+        UUID id = p.getUniqueId();
+        BukkitTask task = new BukkitRunnable() {
+            @Override public void run() {
+                if (!p.isOnline() || !introPlayers.contains(id)) { cancel(); introParticleTasks.remove(id); return; }
+                Location b = p.getLocation();
+                for (int i = 0; i < 10; i++) {
+                    double x = b.getX() + (Math.random() * 14.0 - 7.0);
+                    double z = b.getZ() + (Math.random() * 14.0 - 7.0);
+                    double y = b.getY() + 3.0 + Math.random() * 8.0;
+                    p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0, -0.20, 0, 0);
+                }
+                for (int i = 0; i < 3; i++) {
+                    double x = b.getX() + (Math.random() * 5.0 - 2.5);
+                    double z = b.getZ() + 2.0 + (Math.random() * 4.0 - 2.0);
+                    double y = b.getY() + 1.0 + Math.random() * 4.0;
+                    p.spawnParticle(Particle.SOUL_FIRE_FLAME, x, y, z, 1, 0, -0.12, 0, 0);
+                }
+            }
+        }.runTaskTimer(this, 0L, 4L);
+        introParticleTasks.put(id, task);
+    }'''
+s = replace_method(s, '    private void startIntroParticles(Player p)', particle)
+
+# Reliable queued book open.
+if 'private void queueIntroBook(Player p)' not in s:
+    q = '''    private void queueIntroBook(Player p) {
+        UUID id = p.getUniqueId();
+        if (!introPlayers.contains(id) || introBookQueued.contains(id) || introTransitioning.contains(id)) return;
+        introBookQueued.add(id);
+        Bukkit.getScheduler().runTask(this, () -> {
+            introBookQueued.remove(id);
+            if (p.isOnline() && introPlayers.contains(id) && !introTransitioning.contains(id)) openIntroductionBook(p);
+        });
+    }
+
+'''
+    s = s.replace('    private void openIntroductionBook(Player p) {', q + '    private void openIntroductionBook(Player p) {', 1)
+
+handlers = '''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroLeftClick(PlayerInteractEvent e) {
+        if (e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_AIR && e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_BLOCK) return;
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        e.setCancelled(true);
+        queueIntroBook(p);
+    }
+
+'''
+if 'public void onIntroLeftClick(PlayerInteractEvent e)' not in s:
+    marker = '    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)\n    public void onIntroEntityInteract'
+    s = s.replace(marker, handlers + marker, 1)
+
+s = replace_method(s, '    public void onIntroEntityDamage(EntityDamageByEntityEvent e)', '''    public void onIntroEntityDamage(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player p)) return;
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (!isIntroTarget(p.getUniqueId(), e.getEntity())) return;
+        e.setCancelled(true);
+        queueIntroBook(p);
+    }''')
+
+# Reconnect safety: if the player disconnects during the cinematic drop, land
+# them safely instead of resuming in midair.
 on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
@@ -79,9 +151,7 @@ on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
             Bukkit.getScheduler().runTask(this, () -> {
                 if (!p.isOnline()) return;
                 World target = null;
-                for (World w : Bukkit.getWorlds()) {
-                    if (!isIntroWorld(w)) { target = w; break; }
-                }
+                for (World w : Bukkit.getWorlds()) if (!isIntroWorld(w)) { target = w; break; }
                 if (target == null) return;
                 Location safe = safeSpawn(target);
                 p.setGameMode(GameMode.SURVIVAL);
@@ -103,7 +173,7 @@ on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     }'''
 s = replace_method(s, '    public void onJoin(PlayerJoinEvent e)', on_join)
 
-# Add a robust safe-spawn helper immediately before the transition method.
+# Find a genuinely safe block near world spawn.
 if 'private Location safeSpawn(World world)' not in s:
     helper = '''    private Location safeSpawn(World world) {
         Location base = world.getSpawnLocation().clone();
@@ -129,10 +199,11 @@ if 'private Location safeSpawn(World world)' not in s:
     }
 
 '''
-    marker = '    private void beginWorldDrop(Player p) {'
-    s = s.replace(marker, helper + marker, 1)
+    s = s.replace('    private void beginWorldDrop(Player p) {', helper + '    private void beginWorldDrop(Player p) {', 1)
 
-# Replace the generated transition method with a safe version.
+# Single protected transition method. Flight is permitted for only the short
+# cinematic drop; fall distance is kept at zero and the pending ground location
+# is persisted before the teleport.
 begin_drop = '''    private void beginWorldDrop(Player p) {
         UUID id = p.getUniqueId();
         if (!introPlayers.contains(id) || introTransitioning.contains(id)) return;
@@ -147,22 +218,17 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
         p.closeInventory();
 
         World target = null;
-        if (getConfig().getBoolean("settings.intro-use-main-world-spawn", true) && !Bukkit.getWorlds().isEmpty()) {
-            target = Bukkit.getWorlds().get(0);
-        }
+        if (getConfig().getBoolean("settings.intro-use-main-world-spawn", true) && !Bukkit.getWorlds().isEmpty()) target = Bukkit.getWorlds().get(0);
         if (target == null || isIntroWorld(target)) {
-            for (World w : Bukkit.getWorlds()) {
-                if (!isIntroWorld(w)) { target = w; break; }
-            }
+            for (World w : Bukkit.getWorlds()) if (!isIntroWorld(w)) { target = w; break; }
         }
         if (target == null) { introTransitioning.remove(id); return; }
+        final World targetWorld = target;
 
-        Location safe = safeSpawn(target);
+        Location safe = safeSpawn(targetWorld);
         Location drop = safe.clone().add(0.0, 40.0, 0.0);
         drop.setPitch(0.0f);
 
-        // Persist this BEFORE teleporting so a disconnect/kick can never leave
-        // the player stranded in the sky on their next join.
         records.set("players." + id + ".intro-drop-pending", true);
         records.set("players." + id + ".intro-complete", true);
         records.set("players." + id + ".intro-complete-time", Instant.now().toString());
@@ -174,9 +240,6 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
         restoreVisibility(p);
         p.setGameMode(GameMode.SURVIVAL);
         p.setGravity(true);
-        // Keep flight permission on during the short cinematic fall so
-        // Paper's survival fly check cannot kick the player for the scripted
-        // teleport/velocity transition. It is disabled as soon as they land.
         p.setAllowFlight(true);
         p.setFlying(false);
         p.removePotionEffect(PotionEffectType.BLINDNESS);
@@ -189,6 +252,7 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
             int ticks = 0;
             @Override public void run() {
                 if (!p.isOnline()) { cancel(); return; }
+                p.setFallDistance(0.0f);
                 ticks++;
                 if (p.isOnGround() || ticks >= 120) {
                     p.setAllowFlight(false);
@@ -207,7 +271,33 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
     private void completeIntroduction(Player p) {
         beginWorldDrop(p);
     }'''
+# The original source has no beginWorldDrop, so replace completeIntroduction directly.
 s = replace_method(s, '    private void completeIntroduction(Player p)', begin_drop)
 
+# Reset must always remove the temporary intro flight permission/effects.
+reset = '''    private void resetIntroState(Player p) {
+        UUID id = p.getUniqueId();
+        introPlayers.remove(id);
+        introBookQueued.remove(id);
+        introTransitioning.remove(id);
+        stopIntroParticles(id);
+        stopIntroAmbient(id);
+        removeIntroPrompt(id);
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.removePotionEffect(PotionEffectType.SLOWNESS);
+        p.removePotionEffect(PotionEffectType.BLINDNESS);
+        p.setGravity(true);
+        p.setAllowFlight(false);
+        p.setFlying(false);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
+        p.setGameMode(GameMode.SURVIVAL);
+        restoreVisibility(p);
+        releaseIntroInstanceSlot(id);
+    }'''
+s = replace_method(s, '    private void resetIntroState(Player p)', reset)
+
 P.write_text(s)
-print('Drop safety patch applied: intro hover cannot trigger flying kick, and reconnects recover safely.')
+print('Intro safety patch ready: no anti-fly kick, protected sky-drop, safe reconnect, darkness, and reliable left click.')
