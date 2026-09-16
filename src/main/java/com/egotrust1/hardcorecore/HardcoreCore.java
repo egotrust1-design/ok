@@ -45,11 +45,13 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         if (getCommand("hardcore") != null) { getCommand("hardcore").setExecutor(this); getCommand("hardcore").setTabCompleter(this); }
         if (getCommand("rules") != null) getCommand("rules").setExecutor(this);
         enforceWorldRules();
+        restoreEliminationBans();
         getLogger().info("HardcoreCore 1.0.0 enabled.");
     }
     @Override public void onDisable() { saveRecords(); }
     private synchronized void saveRecords() { if (records == null || recordsFile == null) return; try { records.save(recordsFile); } catch (IOException e) { getLogger().severe("Could not save eliminations.yml: " + e.getMessage()); } }
     private void enforceWorldRules() { for (World w : Bukkit.getWorlds()) { if (getConfig().getBoolean("settings.force-hardcore-worlds", true)) w.setHardcore(true); if (getConfig().getBoolean("settings.force-hard-difficulty", true)) w.setDifficulty(Difficulty.HARD); } }
+    private void restoreEliminationBans() { ConfigurationSection sec=records.getConfigurationSection("players"); if(sec==null)return; for(String k:sec.getKeys(false)){String path="players."+k; if(!records.getBoolean(path+".eliminated",false))continue; try { UUID id=UUID.fromString(k); OfflinePlayer p=Bukkit.getOfflinePlayer(id); p.ban(getConfig().getString("messages.death-ban-reason","Hardcore death"),(Instant)null,"HardcoreCore",false); } catch(IllegalArgumentException ignored) {} } }
     @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true) public void onWorldLoad(WorldLoadEvent e) { World w=e.getWorld(); if(getConfig().getBoolean("settings.force-hardcore-worlds",true))w.setHardcore(true); if(getConfig().getBoolean("settings.force-hard-difficulty",true))w.setDifficulty(Difficulty.HARD); }
 
     @EventHandler(priority=EventPriority.HIGHEST, ignoreCancelled=true) public void onDeath(PlayerDeathEvent e) {
@@ -69,7 +71,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     private void openRules(Player p) {
         ItemStack book=new ItemStack(Material.WRITTEN_BOOK); BookMeta meta=(BookMeta)book.getItemMeta(); meta.title(Component.text("Server Rules")); meta.author(Component.text("Hardcore SMP"));
         String[] pages={
-            "You only get one life. If you die, you are permanently eliminated.\n\nPvP is allowed. Fight who you want, but remember that dying means losing your life.\n\nGriefing is allowed, but excessive destruction intended only to ruin someone's experience may result in punishment.",
+            "You only get one life. If you die, you are permanently eliminated.\n\nPvP is allowed. Fight who you want, but remember that dying means losing your life.\n\nGriefing is allowed, but excessive destruction may result in punishment.",
             "Stealing is allowed. Protect your valuables and don't leave important items exposed.\n\nHacked clients, unfair advantages, combat cheats, and exploits that provide an unreasonable advantage are forbidden.\n\nDo not abuse server-breaking exploits, crash exploits, or exploits that can damage the server.",
             "Trash talk and rivalries are fine. Harassment, threats, hate speech, and targeted bullying are not.\n\nDo not use alternate accounts to bypass an elimination, ban, or other punishment.\n\nDo not impersonate admins or abuse permissions, commands, or server bugs.",
             "Only authorized admins can revive eliminated players. Do not attempt to bypass an elimination yourself.\n\nDo not intentionally destroy massive areas of the world just to cause unnecessary lag or server performance issues.\n\nReport serious bugs or exploits to an admin instead of abusing them for an unfair advantage.",
@@ -100,5 +102,3 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     @Override public List<String> onTabComplete(CommandSender s,Command c,String alias,String[] a){if(!s.hasPermission("hardcore.admin")||!c.getName().equalsIgnoreCase("hardcore"))return Collections.emptyList(); if(a.length==1)return partial(List.of("revive","death"),a[0]); if(a.length==2&&(a[0].equalsIgnoreCase("revive")||a[0].equalsIgnoreCase("death"))){List<String> n=new ArrayList<>();for(Player p:Bukkit.getOnlinePlayers())n.add(p.getName());ConfigurationSection sec=records.getConfigurationSection("players");if(sec!=null)for(String k:sec.getKeys(false)){String name=records.getString("players."+k+".name");if(name!=null&&!n.contains(name))n.add(name);}return partial(n,a[1]);} if(a.length==3&&a[0].equalsIgnoreCase("revive"))return partial(List.of("confirm"),a[2]);return Collections.emptyList();}
     private List<String> partial(List<String> opts,String in){List<String> out=new ArrayList<>();for(String x:opts)if(x.toLowerCase().startsWith(in.toLowerCase()))out.add(x);Collections.sort(out);return out;}
 }
-
-// Build trigger: verified /rules implementation uses BookMeta.addPage(String...).
