@@ -153,6 +153,7 @@ onjoin = '''    @EventHandler(priority = EventPriority.MONITOR)
                     p.setFlying(false);
                     p.setGravity(true);
                     p.removePotionEffect(PotionEffectType.BLINDNESS);
+                    p.removePotionEffect(PotionEffectType.SLOWNESS);
                     p.setFallDistance(0.0f);
                     p.teleport(ground);
                     p.setVelocity(new Vector(0, 0, 0));
@@ -213,7 +214,9 @@ complete = '''    private void beginWorldDrop(Player p) {
 
         Location spawn = target.getSpawnLocation().clone();
         Location ground = target.getHighestBlockAt(spawn.getBlockX(), spawn.getBlockZ()).getLocation().add(0.5, 1.0, 0.5);
-        Location drop = ground.clone().add(0.0, 64.0, 0.0);
+        World dropWorld = target;
+        Location dropGround = ground.clone();
+        Location drop = dropGround.clone().add(0.0, 64.0, 0.0);
         drop.setYaw(spawn.getYaw());
         drop.setPitch(0.0f);
 
@@ -226,15 +229,16 @@ complete = '''    private void beginWorldDrop(Player p) {
         p.setFlying(false);
         p.setFallDistance(0.0f);
         p.removePotionEffect(PotionEffectType.BLINDNESS);
+        p.removePotionEffect(PotionEffectType.SLOWNESS);
         p.teleport(drop);
         p.setVelocity(new Vector(0.0, -0.20, 0.0));
 
         records.set("players." + id + ".intro-complete", true);
         records.set("players." + id + ".intro-drop-active", true);
-        records.set("players." + id + ".intro-drop-world", target.getName());
-        records.set("players." + id + ".intro-drop-x", ground.getX());
-        records.set("players." + id + ".intro-drop-y", ground.getY());
-        records.set("players." + id + ".intro-drop-z", ground.getZ());
+        records.set("players." + id + ".intro-drop-world", dropWorld.getName());
+        records.set("players." + id + ".intro-drop-x", dropGround.getX());
+        records.set("players." + id + ".intro-drop-y", dropGround.getY());
+        records.set("players." + id + ".intro-drop-z", dropGround.getZ());
         records.set("players." + id + ".intro-drop-yaw", spawn.getYaw());
         records.set("players." + id + ".intro-complete-time", Instant.now().toString());
         records.set("players." + id + ".name", p.getName());
@@ -244,8 +248,9 @@ complete = '''    private void beginWorldDrop(Player p) {
             @Override public void run() {
                 if (!p.isOnline()) { cancel(); return; }
                 p.setFallDistance(0.0f);
-                if (!p.getWorld().equals(target) || p.getLocation().getY() <= ground.getY() + 2.0 || p.isOnGround()) {
+                if (!p.getWorld().equals(dropWorld) || p.getLocation().getY() <= dropGround.getY() + 2.0 || p.isOnGround()) {
                     p.setAllowFlight(false);
+                    p.setFlying(false);
                     p.setFallDistance(0.0f);
                     records.set("players." + id + ".intro-drop-active", false);
                     saveRecords();
@@ -262,4 +267,4 @@ complete = '''    private void beginWorldDrop(Player p) {
 s = method(s, '    private void completeIntroduction(Player p)', complete)
 
 p.write_text(s)
-print('Intro transition patched: allow flight while limbo is gravity-disabled, protected sky-drop, safe reconnect handling, and reliable left click.')
+print('Intro safety fixed: protected sky-drop, anti-flying kick protection, immediate darkness removal, and safe reconnect recovery.')
