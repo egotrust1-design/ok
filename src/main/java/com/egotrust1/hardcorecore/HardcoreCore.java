@@ -29,6 +29,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.*;
 
@@ -39,7 +41,14 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     @Override public void onEnable() {
         saveDefaultConfig();
         if (!getDataFolder().exists() && !getDataFolder().mkdirs()) { getLogger().severe("Could not create plugin data folder."); getServer().getPluginManager().disablePlugin(this); return; }
-        recordsFile = new File(getDataFolder(), "eliminations.yml");
+        File oldRecordsFile = new File(getDataFolder(), "eliminations.yml");
+        File externalDataFolder = new File(getDataFolder().getParentFile(), "HardcoreCoreData");
+        if (!externalDataFolder.exists() && !externalDataFolder.mkdirs()) { getLogger().severe("Could not create external HardcoreCoreData folder."); getServer().getPluginManager().disablePlugin(this); return; }
+        recordsFile = new File(externalDataFolder, "eliminations.yml");
+        if (!recordsFile.exists() && oldRecordsFile.exists()) {
+            try { Files.copy(oldRecordsFile.toPath(), recordsFile.toPath(), StandardCopyOption.COPY_ATTRIBUTES); getLogger().info("Migrated elimination records to HardcoreCoreData."); }
+            catch (IOException e) { getLogger().severe("Could not migrate elimination records: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
+        }
         records = YamlConfiguration.loadConfiguration(recordsFile);
         getServer().getPluginManager().registerEvents(this, this);
         if (getCommand("hardcore") != null) { getCommand("hardcore").setExecutor(this); getCommand("hardcore").setTabCompleter(this); }
