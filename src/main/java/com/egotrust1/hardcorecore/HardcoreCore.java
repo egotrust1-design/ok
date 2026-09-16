@@ -51,7 +51,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
     private static final int ROOM_MAX = 50;
     private static final int ROOM_BOTTOM = 90;
     private static final int ROOM_TOP = 150;
-    private static final int BUTTON_Z = 8;
+    private static final int BUTTON_Z = 4;
     private static final int BUTTON_Y = 120;
 
     private File recordsFile;
@@ -119,11 +119,29 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         for (int x = ROOM_MIN + 1; x < ROOM_MAX; x++) for (int z = ROOM_MIN + 1; z < ROOM_MAX; z++) for (int y = ROOM_BOTTOM + 1; y < ROOM_TOP; y++) {
             if (w.getBlockAt(x, y, z).getType() != Material.AIR) w.getBlockAt(x, y, z).setType(Material.AIR, false);
         }
+
+        // A clearly visible object is placed close enough to be seen through the intro darkness.
+        // The button faces the player (south) and sits on a white pedestal/wall.
+        for (int x = -2; x <= 2; x++) {
+            for (int z = 5; z <= 7; z++) {
+                w.getBlockAt(x, ROOM_BOTTOM + 1, z).setType(Material.QUARTZ_BLOCK, false);
+            }
+        }
+        for (int y = BUTTON_Y - 2; y <= BUTTON_Y + 2; y++) {
+            for (int x = -2; x <= 2; x++) {
+                w.getBlockAt(x, y, 5).setType(Material.WHITE_CONCRETE, false);
+            }
+        }
         Block button = w.getBlockAt(0, BUTTON_Y, BUTTON_Z);
         button.setType(Material.POLISHED_BLACKSTONE_BUTTON, false);
-        if (button.getBlockData() instanceof Directional directional) { directional.setFacing(BlockFace.SOUTH); button.setBlockData(directional, false); }
-        w.getBlockAt(0, BUTTON_Y - 1, BUTTON_Z).setType(Material.POLISHED_BLACKSTONE, false);
-        w.getBlockAt(0, BUTTON_Y - 2, BUTTON_Z).setType(Material.POLISHED_BLACKSTONE, false);
+        if (button.getBlockData() instanceof Directional directional) {
+            directional.setFacing(BlockFace.SOUTH);
+            button.setBlockData(directional, false);
+        }
+        w.getBlockAt(0, BUTTON_Y - 1, BUTTON_Z).setType(Material.QUARTZ_BLOCK, false);
+        w.getBlockAt(0, BUTTON_Y + 1, BUTTON_Z).setType(Material.QUARTZ_BLOCK, false);
+        w.getBlockAt(-1, BUTTON_Y - 1, BUTTON_Z).setType(Material.QUARTZ_BLOCK, false);
+        w.getBlockAt(1, BUTTON_Y - 1, BUTTON_Z).setType(Material.QUARTZ_BLOCK, false);
     }
 
     private boolean isIntroWorld(World w) { return w != null && INTRO_WORLD_NAME.equals(w.getName()); }
@@ -201,11 +219,11 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         int task = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
             if (!p.isOnline() || !introPlayers.contains(id)) { stopIntroParticles(id); return; }
             Location base = p.getLocation();
-            for (int i = 0; i < 5; i++) {
-                double x = base.getX() + (Math.random() * 20.0 - 10.0);
-                double z = base.getZ() + (Math.random() * 20.0 - 10.0);
-                double y = base.getY() + 12.0 + Math.random() * 20.0;
-                p.spawnParticle(Particle.WHITE_ASH, x, y, z, 1, 0.0, -0.15, 0.0, 0.0);
+            for (int i = 0; i < 12; i++) {
+                double x = base.getX() + (Math.random() * 18.0 - 9.0);
+                double z = base.getZ() + (Math.random() * 18.0 - 9.0);
+                double y = base.getY() + 4.0 + Math.random() * 12.0;
+                p.spawnParticle(Particle.SNOWFLAKE, x, y, z, 1, 0.0, 0.0, 0.0, 0.0);
             }
         }, 0L, 2L);
         introParticleTasks.put(id, task);
