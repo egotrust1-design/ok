@@ -34,6 +34,14 @@ def replace_method(src, signature, body):
                     return src[:start] + body + src[i + 1:]
     raise SystemExit(f'Unclosed method: {signature}')
 
+# Gravity is disabled in the intro, so permit flight for the duration of the
+# limbo state. This prevents Paper's anti-fly check from kicking a stationary
+# player who is deliberately hovering in the void.
+s = s.replace(
+    '        p.setAllowFlight(false);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
+    '        p.setAllowFlight(true);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
+    1
+)
 
 # Prevent a player who was kicked/disconnected during the sky drop from
 # reconnecting in mid-air and dying. A pending transition is recovered to
@@ -186,7 +194,6 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
                     p.setAllowFlight(false);
                     p.setFlying(false);
                     p.setFallDistance(0.0f);
-                    p.setVelocity(new Vector(0, 0, 0));
                     records.set("players." + id + ".intro-drop-pending", false);
                     saveRecords();
                     p.sendMessage(Component.text("Welcome to the Hardcore SMP."));
@@ -200,7 +207,7 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
     private void completeIntroduction(Player p) {
         beginWorldDrop(p);
     }'''
-s = replace_method(s, '    private void completeIntroduction(Player p)', begin_drop.replace('\n\n    private void completeIntroduction(Player p) {\n        beginWorldDrop(p);\n    }', '\n\n    private void completeIntroduction(Player p) {\n        beginWorldDrop(p);\n    }'))
+s = replace_method(s, '    private void completeIntroduction(Player p)', begin_drop)
 
 P.write_text(s)
-print('Drop safety patch applied: no flying kick, no blind sky-fall, safe reconnect recovery.')
+print('Drop safety patch applied: intro hover cannot trigger flying kick, and reconnects recover safely.')
