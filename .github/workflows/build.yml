@@ -18,6 +18,8 @@ jobs:
           cache: maven
       - name: Patch intro
         run: python3 build_patch.py
+      - name: Apply drop safety patch
+        run: python3 drop_safety_patch.py
       - name: Sanitize generated source
         run: |
           python3 - <<'PY'
