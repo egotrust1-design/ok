@@ -49,6 +49,7 @@ public final class HardcoreCore extends JavaPlugin implements Listener, org.bukk
         recordsFile = new File(getDataFolder(), "eliminations.yml");
         records = YamlConfiguration.loadConfiguration(recordsFile);
         getServer().getPluginManager().registerEvents(this, this);
+        getServer().getPluginManager().registerEvents(new DeathMessageListener(), this);
         if (getCommand("hardcore") != null) {
             getCommand("hardcore").setExecutor(this);
             getCommand("hardcore").setTabCompleter(this);
