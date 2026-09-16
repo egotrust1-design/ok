@@ -17,7 +17,9 @@ jobs:
           java-version: '25'
           cache: maven
       - name: Build
-        run: mvn -B -ntp clean package
+        run: |
+          sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
+          mvn -B -ntp clean package
       - name: Upload plugin JAR
         uses: actions/upload-artifact@v4
         with:
