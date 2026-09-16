@@ -3,7 +3,7 @@ version: 1.0.0
 main: com.egotrust1.hardcorecore.HardcoreCore
 api-version: '26.2'
 author: egtorust1-design
-description: One-life Hardcore enforcement for Paper 26.2.
+description: One-life Hardcore enforcement for Paper 26.2 with server rules.
 commands:
   hardcore:
     description: HardcoreCore administration
