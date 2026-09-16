@@ -9,6 +9,9 @@ commands:
     description: HardcoreCore administration
     usage: /hardcore <revive|death> <player> [confirm] [reason]
     permission: hardcore.admin
+  rules:
+    description: Opens the server rules
+    usage: /rules
 permissions:
   hardcore.admin:
     description: Access HardcoreCore administration commands
