@@ -18,6 +18,8 @@ jobs:
           cache: maven
       - name: Apply intro safety patch
         run: python3 drop_safety_patch.py
+      - name: Add safe spawn helper
+        run: python3 safe_spawn_add.py
       - name: Sanitize generated source
         run: |
           python3 - <<'PY'
