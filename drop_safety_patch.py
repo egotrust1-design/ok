@@ -34,26 +34,25 @@ def replace_method(src, signature, body):
                     return src[:start] + body + src[i + 1:]
     raise SystemExit(f'Unclosed method: {signature}')
 
-# Required import and small state sets used by the intro handlers.
+# Required imports/state.
 if 'import org.bukkit.event.player.PlayerInteractEvent;' not in s:
     s = s.replace('import org.bukkit.event.player.PlayerInteractEntityEvent;\n', 'import org.bukkit.event.player.PlayerInteractEntityEvent;\nimport org.bukkit.event.player.PlayerInteractEvent;\n', 1)
 if 'private final Set<UUID> introBookQueued' not in s:
     s = s.replace('    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n', '    private final Map<UUID, Integer> introInstanceSlots = new HashMap<>();\n    private final Set<UUID> introBookQueued = new HashSet<>();\n    private final Set<UUID> introTransitioning = new HashSet<>();\n', 1)
 
-# Gravity is disabled in the intro, so allow flight permission there to stop
-# Paper's anti-fly check from kicking a stationary player in the void.
+# Gravity is disabled in the limbo, so keep the temporary flight permission on.
 s = s.replace(
     '        p.setAllowFlight(false);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
     '        p.setAllowFlight(true);\n        p.setFlying(false);\n        p.setWalkSpeed(0.0f);',
     1
 )
 
-# Darkness while the player is still in the intro.
+# Dark intro effect.
 needle = '        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));\n'
 if needle in s and 'p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS' not in s:
     s = s.replace(needle, needle + '        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));\n', 1)
 
-# Lighter particles for simultaneous players.
+# Lower particle load.
 particle = '''    private void startIntroParticles(Player p) {
         stopIntroParticles(p.getUniqueId());
         UUID id = p.getUniqueId();
@@ -79,7 +78,7 @@ particle = '''    private void startIntroParticles(Player p) {
     }'''
 s = replace_method(s, '    private void startIntroParticles(Player p)', particle)
 
-# Reliable queued book open.
+# Reliable M1: both the client interact event and arm-swing animation feed the same queued open.
 if 'private void queueIntroBook(Player p)' not in s:
     q = '''    private void queueIntroBook(Player p) {
         UUID id = p.getUniqueId();
@@ -87,7 +86,13 @@ if 'private void queueIntroBook(Player p)' not in s:
         introBookQueued.add(id);
         Bukkit.getScheduler().runTask(this, () -> {
             introBookQueued.remove(id);
-            if (p.isOnline() && introPlayers.contains(id) && !introTransitioning.contains(id)) openIntroductionBook(p);
+            if (!p.isOnline() || !introPlayers.contains(id) || introTransitioning.contains(id)) return;
+            openIntroductionBook(p);
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                if (p.isOnline() && introPlayers.contains(id) && p.getOpenInventory().getType() != org.bukkit.event.inventory.InventoryType.CRAFTING) {
+                    openIntroductionBook(p);
+                }
+            }, 1L);
         });
     }
 
@@ -95,6 +100,14 @@ if 'private void queueIntroBook(Player p)' not in s:
     s = s.replace('    private void openIntroductionBook(Player p) {', q + '    private void openIntroductionBook(Player p) {', 1)
 
 handlers = '''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroArmSwing(org.bukkit.event.player.PlayerAnimationEvent e) {
+        if (e.getAnimationType() != org.bukkit.event.player.PlayerAnimationType.ARM_SWING) return;
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        queueIntroBook(p);
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onIntroLeftClick(PlayerInteractEvent e) {
         if (e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_AIR && e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_BLOCK) return;
         Player p = e.getPlayer();
@@ -116,8 +129,7 @@ s = replace_method(s, '    public void onIntroEntityDamage(EntityDamageByEntityE
         queueIntroBook(p);
     }''')
 
-# Reconnect safety: if the player disconnects during the cinematic drop, land
-# them safely instead of resuming in midair.
+# Reconnect safety during the sky drop.
 on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
@@ -173,7 +185,7 @@ on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     }'''
 s = replace_method(s, '    public void onJoin(PlayerJoinEvent e)', on_join)
 
-# Find a genuinely safe block near world spawn.
+# Find safe ground close to the target world's spawn.
 if 'private Location safeSpawn(World world)' not in s:
     helper = '''    private Location safeSpawn(World world) {
         Location base = world.getSpawnLocation().clone();
@@ -201,9 +213,70 @@ if 'private Location safeSpawn(World world)' not in s:
 '''
     s = s.replace('    private void beginWorldDrop(Player p) {', helper + '    private void beginWorldDrop(Player p) {', 1)
 
-# Single protected transition method. Flight is permitted for only the short
-# cinematic drop; fall distance is kept at zero and the pending ground location
-# is persisted before the teleport.
+# Reset all temporary intro state.
+reset = '''    private void resetIntroState(Player p) {
+        UUID id = p.getUniqueId();
+        introPlayers.remove(id);
+        introBookQueued.remove(id);
+        introTransitioning.remove(id);
+        stopIntroParticles(id);
+        stopIntroAmbient(id);
+        removeIntroPrompt(id);
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.removePotionEffect(PotionEffectType.SLOWNESS);
+        p.removePotionEffect(PotionEffectType.BLINDNESS);
+        p.setGravity(true);
+        p.setAllowFlight(false);
+        p.setFlying(false);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
+        p.setGameMode(GameMode.SURVIVAL);
+        releaseIntroInstanceSlot(id);
+    }'''
+s = replace_method(s, '    private void resetIntroState(Player p)', reset)
+
+# Start the cutscene in limbo, but DO NOT hide players from one another.
+start_intro = '''    private void startIntroduction(Player p) {
+        if (!p.isOnline()) return;
+        UUID id = p.getUniqueId();
+        if (records.getBoolean("players." + id + ".intro-complete", false)) return;
+        World limbo = Bukkit.getWorld(INTRO_WORLD_NAME);
+        if (limbo == null) {
+            getLogger().severe("Intro limbo world is missing.");
+            return;
+        }
+
+        resetIntroState(p);
+        introPlayers.add(id);
+        allocateIntroInstanceSlot(id);
+
+        p.setGameMode(GameMode.ADVENTURE);
+        p.setAllowFlight(true);
+        p.setFlying(false);
+        p.setWalkSpeed(0.0f);
+        p.setFlySpeed(0.0f);
+        p.setGravity(false);
+        p.setVelocity(new Vector(0, 0, 0));
+        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 60 * 10, 10, false, false, false));
+        p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 60 * 10, 0, false, false, false));
+        p.teleport(introPlayerLocation(id));
+
+        // Deliberately no hidePlayer/showPlayer calls here. The introduction is a cutscene,
+        // not a private-server state: players must remain normal in tab, chat, and join/quit display.
+
+        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
+        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
+        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
+        p.playSound(p.getLocation(), INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC, 0.55f, 0.72f);
+        spawnIntroPrompt(p);
+        startIntroParticles(p);
+        startIntroAmbient(p);
+    }'''
+s = replace_method(s, '    private void startIntroduction(Player p)', start_intro)
+
+# Smooth, controlled sky drop: shorter drop, gentle initial velocity, and a soft brake near the ground.
 begin_drop = '''    private void beginWorldDrop(Player p) {
         UUID id = p.getUniqueId();
         if (!introPlayers.contains(id) || introTransitioning.contains(id)) return;
@@ -226,7 +299,7 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
         final World targetWorld = target;
 
         Location safe = safeSpawn(targetWorld);
-        Location drop = safe.clone().add(0.0, 40.0, 0.0);
+        Location drop = safe.clone().add(0.0, 28.0, 0.0);
         drop.setPitch(0.0f);
 
         records.set("players." + id + ".intro-drop-pending", true);
@@ -237,24 +310,33 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
 
         introPlayers.remove(id);
         releaseIntroInstanceSlot(id);
-        restoreVisibility(p);
         p.setGameMode(GameMode.SURVIVAL);
         p.setGravity(true);
         p.setAllowFlight(true);
         p.setFlying(false);
+        p.setWalkSpeed(0.2f);
+        p.setFlySpeed(0.1f);
         p.removePotionEffect(PotionEffectType.BLINDNESS);
         p.removePotionEffect(PotionEffectType.SLOWNESS);
         p.setFallDistance(0.0f);
         p.teleport(drop);
-        p.setVelocity(new Vector(0.0, -0.18, 0.0));
+        p.setVelocity(new Vector(0.0, -0.05, 0.0));
 
         new BukkitRunnable() {
             int ticks = 0;
             @Override public void run() {
                 if (!p.isOnline()) { cancel(); return; }
-                p.setFallDistance(0.0f);
                 ticks++;
-                if (p.isOnGround() || ticks >= 120) {
+                Location now = p.getLocation();
+                double aboveGround = now.getY() - safe.getY();
+                // Ease the descent near the ground instead of snapping into the landing.
+                if (aboveGround < 10.0) {
+                    p.setVelocity(new Vector(0.0, Math.max(-0.08, p.getVelocity().getY() * 0.82), 0.0));
+                }
+                p.setFallDistance(0.0f);
+                if (p.isOnGround() || aboveGround <= 0.15 || ticks >= 100) {
+                    p.teleport(safe);
+                    p.setVelocity(new Vector(0.0, 0.0, 0.0));
                     p.setAllowFlight(false);
                     p.setFlying(false);
                     p.setFallDistance(0.0f);
@@ -271,33 +353,7 @@ begin_drop = '''    private void beginWorldDrop(Player p) {
     private void completeIntroduction(Player p) {
         beginWorldDrop(p);
     }'''
-# The original source has no beginWorldDrop, so replace completeIntroduction directly.
 s = replace_method(s, '    private void completeIntroduction(Player p)', begin_drop)
 
-# Reset must always remove the temporary intro flight permission/effects.
-reset = '''    private void resetIntroState(Player p) {
-        UUID id = p.getUniqueId();
-        introPlayers.remove(id);
-        introBookQueued.remove(id);
-        introTransitioning.remove(id);
-        stopIntroParticles(id);
-        stopIntroAmbient(id);
-        removeIntroPrompt(id);
-        p.stopSound(INTRO_MUSIC, org.bukkit.SoundCategory.MUSIC);
-        p.stopSound(INTRO_AMBIENT_1, org.bukkit.SoundCategory.AMBIENT);
-        p.stopSound(INTRO_AMBIENT_2, org.bukkit.SoundCategory.AMBIENT);
-        p.removePotionEffect(PotionEffectType.SLOWNESS);
-        p.removePotionEffect(PotionEffectType.BLINDNESS);
-        p.setGravity(true);
-        p.setAllowFlight(false);
-        p.setFlying(false);
-        p.setWalkSpeed(0.2f);
-        p.setFlySpeed(0.1f);
-        p.setGameMode(GameMode.SURVIVAL);
-        restoreVisibility(p);
-        releaseIntroInstanceSlot(id);
-    }'''
-s = replace_method(s, '    private void resetIntroState(Player p)', reset)
-
 P.write_text(s)
-print('Intro safety patch ready: no anti-fly kick, protected sky-drop, safe reconnect, darkness, and reliable left click.')
+print('Updated intro: normal visibility/tab/chat, dual click detection, safer book opening, smoother landing, and reconnect safety.')
