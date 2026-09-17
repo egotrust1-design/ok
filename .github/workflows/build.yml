@@ -16,24 +16,18 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - name: Apply clean intro and RTP base
-        run: python3 last_hardcore_fix.py
-      - name: Apply final clean intro fix
-        run: python3 final_clean_intro_fix.py
-      - name: Sanitize generated source
+      - name: Apply stable intro/RTP rewrite
+        run: python3 stable_intro_rewrite.py
+      - name: Verify generated source has no legacy intro code
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
-          src = path.read_text()
-          src = src.replace('import org.bukkit.event.player.PlayerCommandPreprocessEvent;\n', '')
-          src = src.replace('Particle.WHITE_ASH', 'Particle.DUST')
-          src = src.replace('Particle.SOUL_FIRE_FLAME', 'Particle.DUST')
-          path.write_text(src)
-          print('Generated source sanitized.')
-          PY
-      - name: Apply ultimate intro cleanup
-        run: python3 ultimate_intro_fix.py
+          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk|openRules\(Player p\)' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -q '@EventHandler'; then
+            echo 'Legacy/invalid intro handler detected.'
+            exit 1
+          fi
+          if grep -n 'p.spawnParticle' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -v 'Particle.FIREFLY'; then
+            echo 'A non-FIREFLY intro particle call remains.'
+            exit 1
+          fi
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
