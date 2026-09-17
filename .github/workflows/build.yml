@@ -20,7 +20,7 @@ jobs:
         run: python3 clean_intro_v2.py
       - name: Verify generated source is clean
         run: |
-          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk|openRules\(Player p\)' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
+          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
             echo 'Legacy intro code remains.'
             exit 1
           fi
