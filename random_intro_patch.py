@@ -123,8 +123,8 @@ particles = '''    private void startIntroParticles(Player p) {
                     return;
                 }
                 Location b = p.getLocation();
-                // Fireflies clustered around the tutorial prompt.
-                for (int i = 0; i < 18; i++) {
+                // Firefly Bush particles clustered around the tutorial prompt.
+                for (int i = 0; i < 24; i++) {
                     double angle = Math.random() * Math.PI * 2.0;
                     double radius = 0.7 + Math.random() * 3.6;
                     double x = b.getX() + Math.cos(angle) * radius;
@@ -132,15 +132,12 @@ particles = '''    private void startIntroParticles(Player p) {
                     double y = b.getY() + 0.8 + Math.random() * 4.8;
                     p.spawnParticle(Particle.FIREFLY, x, y, z, 1, 0.0, 0.015, 0.0, 0.0);
                 }
-                // A lot of drifting Nether ash surrounding the scene.
-                for (int i = 70; i < 71; i++) {
-                    // Kept as an explicit loop block so the density is easy to tune.
-                    for (int j = 0; j < 70; j++) {
-                        double x = b.getX() + (Math.random() * 18.0 - 9.0);
-                        double z = b.getZ() + (Math.random() * 18.0 - 9.0);
-                        double y = b.getY() + 1.0 + Math.random() * 14.0;
-                        p.spawnParticle(Particle.ASH, x, y, z, 1, 0.0, -0.035, 0.0, 0.0);
-                    }
+                // Heavy drifting Nether ash filling the surrounding darkness.
+                for (int i = 0; i < 120; i++) {
+                    double x = b.getX() + (Math.random() * 20.0 - 10.0);
+                    double z = b.getZ() + (Math.random() * 20.0 - 10.0);
+                    double y = b.getY() + 0.5 + Math.random() * 16.0;
+                    p.spawnParticle(Particle.ASH, x, y, z, 1, 0.0, -0.035, 0.0, 0.0);
                 }
             }
         }.runTaskTimer(this, 0L, 3L);
@@ -182,9 +179,9 @@ safe_helpers = '''    private boolean isUnsafeArrivalBlock(org.bukkit.block.Bloc
     }
 
     private Location findSafeArrivalNear(World world, int centerX, int centerZ) {
-        // Expand from the random roll so a bad column, lava lake, river, etc.
-        // does not become the player's arrival point.
-        for (int radius = 0; radius <= 16; radius++) {
+        // Keep the search local so completion remains fast. The center roll is
+        // checked first, then a bounded 17x17 square is scanned outward.
+        for (int radius = 0; radius <= 8; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 int z1 = centerZ - radius;
                 int z2 = centerZ + radius;
@@ -213,7 +210,7 @@ safe_helpers = '''    private boolean isUnsafeArrivalBlock(org.bukkit.block.Bloc
     private Location randomIntroArrival(World world) {
         Location origin = world.getSpawnLocation();
         java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
-        for (int attempt = 0; attempt < 48; attempt++) {
+        for (int attempt = 0; attempt < 24; attempt++) {
             int x = origin.getBlockX() + random.nextInt(-8000, 8001);
             int z = origin.getBlockZ() + random.nextInt(-8000, 8001);
             Location found = findSafeArrivalNear(world, x, z);
@@ -315,4 +312,4 @@ s = s.replace(' && !introTransitioning.contains(id)', '')
 s = s.replace('        introTransitioning.remove(id);\n', '')
 
 P.write_text(s)
-print('Updated intro: immediate one-time random arrival within +/-8000 X/Z, robust vanilla-style safe scan, no spawn fallback, no falling sequence, fireflies plus heavy Nether ash, and complete effect cleanup.')
+print('Updated intro: fast one-time random arrival within +/-8000 X/Z, bounded safe scan with no spawn fallback, no falling sequence, fireflies plus heavy Nether ash, and complete effect cleanup.')
