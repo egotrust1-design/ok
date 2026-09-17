@@ -1,6 +1,8 @@
 from pathlib import Path
+
 P = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
 s = P.read_text()
+
 
 def replace_method(src, signature, body):
     start = src.find(signature)
@@ -15,63 +17,102 @@ def replace_method(src, signature, body):
     for i in range(brace, len(src)):
         c = src[i]
         if quote:
-            if esc: esc = False
-            elif c == '\\': esc = True
-            elif c == '"': quote = False
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                quote = False
         else:
-            if c == '"': quote = True
-            elif c == '{': depth += 1
+            if c == '"':
+                quote = True
+            elif c == '{':
+                depth += 1
             elif c == '}':
                 depth -= 1
                 if depth == 0:
                     return src[:start] + body + src[i + 1:]
     raise SystemExit(f'Unclosed method: {signature}')
 
+
 def remove_method(src, signature):
     start = src.find(signature)
-    if start < 0: return src
+    if start < 0:
+        return src
     brace = src.find('{', start)
-    if brace < 0: raise SystemExit(f'Missing body: {signature}')
+    if brace < 0:
+        raise SystemExit(f'Missing body: {signature}')
     depth = 0
     quote = False
     esc = False
     for i in range(brace, len(src)):
         c = src[i]
         if quote:
-            if esc: esc = False
-            elif c == '\\': esc = True
-            elif c == '"': quote = False
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                quote = False
         else:
-            if c == '"': quote = True
-            elif c == '{': depth += 1
+            if c == '"':
+                quote = True
+            elif c == '{':
+                depth += 1
             elif c == '}':
                 depth -= 1
                 if depth == 0:
                     return src[:start] + src[i + 1:]
     raise SystemExit(f'Unclosed method: {signature}')
 
-# Track one prepared destination per intro. The preparation begins while the
-# cinematic is running so the final click can usually teleport immediately.
-needle = '    private final Set<UUID> introPlayers = new HashSet<>();\n'
-if 'introArrivalTokens' not in s:
-    s = s.replace(needle, needle +
-        '    private final Map<UUID, UUID> introArrivalTokens = new HashMap<>();\n'
-        '    private final Map<UUID, Location> preparedIntroArrivals = new HashMap<>();\n'
-        '    private final Set<UUID> introArrivalPreparing = new HashSet<>();\n'
-        '    private final Set<UUID> introArrivalCompletionQueued = new HashSet<>();\n', 1)
+# Prevent the clickable written-book action from entering Bukkit's command
+# executor/logging path. The click still completes the intro, but the console
+# no longer reports that the player manually typed /hardcore intro.
+if 'import org.bukkit.event.player.PlayerCommandPreprocessEvent;' not in s:
+    s = s.replace('import org.bukkit.event.player.PlayerJoinEvent;\n', 'import org.bukkit.event.player.PlayerJoinEvent;\nimport org.bukkit.event.player.PlayerCommandPreprocessEvent;\n', 1)
 
-# Begin preparing the random destination as soon as the intro starts.
+handler = '''    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onIntroBookCompleteCommand(PlayerCommandPreprocessEvent e) {
+        Player p = e.getPlayer();
+        if (!introPlayers.contains(p.getUniqueId())) return;
+        if (!e.getMessage().equalsIgnoreCase("/hardcore intro")) return;
+        e.setCancelled(true);
+        completeIntroduction(p);
+    }
+
+'''
+if 'public void onIntroBookCompleteCommand(PlayerCommandPreprocessEvent e)' not in s:
+    marker = '    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)\n    public void onIntroArmSwing'
+    if marker in s:
+        s = s.replace(marker, handler + marker, 1)
+    else:
+        s = s.replace('    private void openIntroductionBook(Player p)', handler + '    private void openIntroductionBook(Player p)', 1)
+
+# Destination state. A prepared location is generated while the player is still
+# in limbo, and one preparation token invalidates stale async callbacks.
+needle = '    private final Set<UUID> introPlayers = new HashSet<>();\n'
+state = ('    private final Map<UUID, UUID> introArrivalTokens = new HashMap<>();\n'
+         '    private final Map<UUID, Location> preparedIntroArrivals = new HashMap<>();\n'
+         '    private final Set<UUID> introArrivalPreparing = new HashSet<>();\n'
+         '    private final Set<UUID> introArrivalCompletionQueued = new HashSet<>();\n')
+if 'introArrivalTokens' not in s:
+    s = s.replace(needle, needle + state, 1)
+
+# Begin preparation automatically when the intro starts.
 marker = '        startIntroAmbient(p);\n    }'
 if 'prepareRandomIntroArrival(p);' not in s:
     s = s.replace(marker, '        startIntroAmbient(p);\n        prepareRandomIntroArrival(p);\n    }', 1)
 
-# Remove the old blocking helpers. Keep the block-safety predicates, then use an
-# already-loaded chunk for the small local surface scan.
+# Remove the old custom loaded-chunk search and replace it with the actual vanilla
+# PlayerRespawnLogic implementation. Vanilla checks the candidate chunk's valid
+# spawn position rather than our hand-written hazard rules.
 for sig in [
+    '    private Location findSafeArrivalInLoadedChunk(World world, org.bukkit.Chunk chunk, int preferredX, int preferredZ)',
     '    private Location randomIntroArrival(World world)',
     '    private Location findSafeArrivalNear(World world, int centerX, int centerZ)'
 ]:
-    s = remove_method(s, sig)
+    while sig in s:
+        s = remove_method(s, sig)
 
 new_methods = '''    private World getIntroArrivalWorld() {
         World target = null;
@@ -89,90 +130,99 @@ new_methods = '''    private World getIntroArrivalWorld() {
         return target;
     }
 
-    private Location findSafeArrivalInLoadedChunk(World world, org.bukkit.Chunk chunk, int preferredX, int preferredZ) {
-        int minX = world.getSpawnLocation().getBlockX() - 8000;
-        int maxX = world.getSpawnLocation().getBlockX() + 8000;
-        int minZ = world.getSpawnLocation().getBlockZ() - 8000;
-        int maxZ = world.getSpawnLocation().getBlockZ() + 8000;
-        int baseX = chunk.getX() << 4;
-        int baseZ = chunk.getZ() << 4;
-        int localX = Math.max(0, Math.min(15, preferredX - baseX));
-        int localZ = Math.max(0, Math.min(15, preferredZ - baseZ));
-
-        // Scan only this already-loaded chunk. This never calls getChunkFallback
-        // for dozens of previously-unloaded chunks during the command itself.
-        for (int radius = 0; radius <= 4; radius++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) continue;
-                    int lx = localX + dx;
-                    int lz = localZ + dz;
-                    if (lx < 0 || lx > 15 || lz < 0 || lz > 15) continue;
-                    int x = baseX + lx;
-                    int z = baseZ + lz;
-                    if (x < minX || x > maxX || z < minZ || z > maxZ) continue;
-                    int y = world.getHighestBlockYAt(x, z);
-                    if (isSafeArrivalColumn(world, x, y, z)) {
-                        return new Location(world, x + 0.5, y, z + 0.5);
-                    }
-                }
-            }
+    private Location vanillaSpawnInLoadedChunk(World world, org.bukkit.Chunk chunk) {
+        try {
+            Class<?> craftWorldClass = Class.forName("org.bukkit.craftbukkit.CraftWorld");
+            Object craftWorld = craftWorldClass.cast(world);
+            Object serverLevel = craftWorldClass.getMethod("getHandle").invoke(craftWorld);
+            Class<?> serverLevelClass = Class.forName("net.minecraft.server.level.ServerLevel");
+            Class<?> chunkPosClass = Class.forName("net.minecraft.world.level.ChunkPos");
+            Object chunkPos = chunkPosClass.getConstructor(int.class, int.class).newInstance(chunk.getX(), chunk.getZ());
+            Class<?> respawnLogicClass = Class.forName("net.minecraft.server.level.PlayerRespawnLogic");
+            java.lang.reflect.Method method = respawnLogicClass.getMethod("getSpawnPosInChunk", serverLevelClass, chunkPosClass);
+            Object blockPos = method.invoke(null, serverLevel, chunkPos);
+            if (blockPos == null) return null;
+            Class<?> blockPosClass = Class.forName("net.minecraft.core.BlockPos");
+            int x = ((Number) blockPosClass.getMethod("getX").invoke(blockPos)).intValue();
+            int y = ((Number) blockPosClass.getMethod("getY").invoke(blockPos)).intValue();
+            int z = ((Number) blockPosClass.getMethod("getZ").invoke(blockPos)).intValue();
+            return new Location(world, x + 0.5, y, z + 0.5);
+        } catch (ReflectiveOperationException | SecurityException ex) {
+            getLogger().warning("Vanilla spawn detection could not be accessed: " + ex.getClass().getSimpleName() + ". " + ex.getMessage());
+            return null;
         }
-        return null;
+    }
+
+    private Location prepareRandomIntroCandidate(World world) {
+        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+        Location origin = world.getSpawnLocation();
+        int minX = origin.getBlockX() - 7984;
+        int maxX = origin.getBlockX() + 7984;
+        int minZ = origin.getBlockZ() - 7984;
+        int maxZ = origin.getBlockZ() + 7984;
+        int x = random.nextInt(minX, maxX + 1);
+        int z = random.nextInt(minZ, maxZ + 1);
+        return new Location(world, x, 0.0, z);
     }
 
     private void prepareRandomIntroArrival(Player p) {
         UUID id = p.getUniqueId();
-        if (!p.isOnline() || !introPlayers.contains(id) || introArrivalPreparing.contains(id) || preparedIntroArrivals.containsKey(id)) return;
+        if (!p.isOnline() || !introPlayers.contains(id)) return;
+        if (preparedIntroArrivals.containsKey(id) || introArrivalPreparing.contains(id)) return;
         World world = getIntroArrivalWorld();
         if (world == null) return;
         UUID token = UUID.randomUUID();
         introArrivalTokens.put(id, token);
-        requestRandomIntroArrival(p, world, token, 0);
+        requestRandomIntroArrival(p, world, token);
     }
 
-    private void requestRandomIntroArrival(Player p, World world, UUID token, int attempt) {
+    private void requestRandomIntroArrival(Player p, World world, UUID token) {
         UUID id = p.getUniqueId();
-        if (!p.isOnline() || !introPlayers.contains(id) || !token.equals(introArrivalTokens.get(id))) return;
-        if (attempt >= 24) {
-            introArrivalPreparing.remove(id);
-            introArrivalTokens.remove(id);
-            getLogger().warning("Could not prepare a safe random intro arrival for " + p.getName() + " inside the 8000-block X/Z range.");
-            return;
-        }
+        if (!isEnabled() || !p.isOnline() || !introPlayers.contains(id) || !token.equals(introArrivalTokens.get(id))) return;
 
-        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
-        Location origin = world.getSpawnLocation();
-        int x = origin.getBlockX() + random.nextInt(-8000, 8001);
-        int z = origin.getBlockZ() + random.nextInt(-8000, 8001);
-        int chunkX = x >> 4;
-        int chunkZ = z >> 4;
+        Location random = prepareRandomIntroCandidate(world);
+        int chunkX = random.getBlockX() >> 4;
+        int chunkZ = random.getBlockZ() >> 4;
         introArrivalPreparing.add(id);
 
         world.getChunkAtAsync(chunkX, chunkZ, true, chunk -> {
             Bukkit.getScheduler().runTask(this, () -> {
+                introArrivalPreparing.remove(id);
                 if (!isEnabled() || !p.isOnline() || !introPlayers.contains(id) || !token.equals(introArrivalTokens.get(id))) return;
-                Location found = findSafeArrivalInLoadedChunk(world, chunk, x, z);
-                if (found != null) {
+
+                Location found = vanillaSpawnInLoadedChunk(world, chunk);
+                Location origin = world.getSpawnLocation();
+                if (found != null
+                        && Math.abs(found.getX() - origin.getX()) <= 8000.0
+                        && Math.abs(found.getZ() - origin.getZ()) <= 8000.0) {
                     found.setYaw(origin.getYaw());
                     found.setPitch(0.0f);
                     preparedIntroArrivals.put(id, found);
-                    introArrivalPreparing.remove(id);
                     if (introArrivalCompletionQueued.remove(id)) finishIntroduction(p, found);
                     return;
                 }
-                introArrivalPreparing.remove(id);
-                requestRandomIntroArrival(p, world, token, attempt + 1);
+
+                // Keep searching asynchronously. There is deliberately no hard
+                // 24-attempt failure anymore, and no blocking chunk lookup.
+                Bukkit.getScheduler().runTaskLater(this, () -> requestRandomIntroArrival(p, world, token), 1L);
             });
         });
     }
 
 '''
-# Insert the new async helpers directly before completeIntroduction and replace that
-# method with a tiny queue-or-finish gate.
-if 'private void prepareRandomIntroArrival(Player p)' not in s:
-    s = s.replace('    private void completeIntroduction(Player p)', new_methods + '    private void completeIntroduction(Player p)', 1)
+if 'private Location vanillaSpawnInLoadedChunk(World world, org.bukkit.Chunk chunk)' in s:
+    s = remove_method(s, '    private Location vanillaSpawnInLoadedChunk(World world, org.bukkit.Chunk chunk)')
+if 'private Location prepareRandomIntroCandidate(World world)' in s:
+    s = remove_method(s, '    private Location prepareRandomIntroCandidate(World world)')
+if 'private void prepareRandomIntroArrival(Player p)' in s:
+    s = remove_method(s, '    private void prepareRandomIntroArrival(Player p)')
+if 'private void requestRandomIntroArrival(Player p, World world, UUID token)' in s:
+    s = remove_method(s, '    private void requestRandomIntroArrival(Player p, World world, UUID token)')
+s = s.replace('    private void completeIntroduction(Player p)', new_methods + '    private void completeIntroduction(Player p)', 1)
 
+# Clicking Enter World finishes immediately when the vanilla-validated location is
+# already prepared. If it is still being prepared, the click is held and completion
+# fires automatically as soon as the safe location arrives.
 complete_gate = '''    private void completeIntroduction(Player p) {
         UUID id = p.getUniqueId();
         if (!introPlayers.contains(id)) return;
@@ -183,7 +233,17 @@ complete_gate = '''    private void completeIntroduction(Player p) {
         }
         if (!introArrivalCompletionQueued.add(id)) return;
         p.sendActionBar(Component.text("Preparing your arrival..."));
-        if (!introArrivalPreparing.contains(id)) prepareRandomIntroArrival(p);
+        if (!introArrivalPreparing.contains(id)) {
+            World world = getIntroArrivalWorld();
+            if (world != null) {
+                UUID token = introArrivalTokens.get(id);
+                if (token == null) {
+                    token = UUID.randomUUID();
+                    introArrivalTokens.put(id, token);
+                }
+                requestRandomIntroArrival(p, world, token);
+            }
+        }
     }'''
 s = replace_method(s, '    private void completeIntroduction(Player p)', complete_gate)
 
@@ -233,21 +293,26 @@ finish = '''    private void finishIntroduction(Player p, Location arrival) {
         saveRecords();
         p.sendMessage(Component.text("Welcome to the Hardcore SMP."));
     }'''
-# Remove the previous synchronous body and place the real finish method after the gate.
 if 'private void finishIntroduction(Player p, Location arrival)' in s:
     s = remove_method(s, '    private void finishIntroduction(Player p, Location arrival)')
 s = s.replace('    private void resetIntroState(Player p)', finish + '\n\n    private void resetIntroState(Player p)', 1)
 
-# Make reconnect/retry cleanup invalidate any old async preparation.
+# Reset invalidates every pending async arrival callback.
 reset_sig = '    private void resetIntroState(Player p)'
-reset_body_start = s.find(reset_sig)
-if reset_body_start >= 0:
-    insert = ('        introArrivalCompletionQueued.remove(id);\n'
+start = s.find(reset_sig)
+if start >= 0:
+    brace = s.find('{', start)
+    insert = ('\n        introArrivalCompletionQueued.remove(id);\n'
               '        preparedIntroArrivals.remove(id);\n'
               '        introArrivalPreparing.remove(id);\n'
               '        introArrivalTokens.remove(id);\n')
-    brace = s.find('{', reset_body_start)
-    s = s[:brace+1] + '\n' + insert + s[brace+1:]
+    if 'introArrivalCompletionQueued.remove(id);' not in s[brace:brace+500]:
+        s = s[:brace+1] + insert + s[brace+1:]
+
+# Make both prompt lines white. There is no blue Soul Fire particle in the random
+# arrival patch; the cinematic uses Firefly + heavy ash only.
+s = s.replace('Component.text("\\nLeft click to continue", TextColor.color(155, 155, 155))',
+              'Component.text("\\nLeft click to continue", TextColor.color(255, 255, 255))')
 
 P.write_text(s)
-print('Reworked intro destination loading to Paper async chunk loading so Enter World cannot block the server thread; destination is prepared during the intro and teleports only after a safe loaded chunk is found.')
+print('Uses vanilla PlayerRespawnLogic spawn detection inside an asynchronously loaded random chunk within +/-8000 X/Z, retries without a hard 24-attempt failure or blocking server-thread chunk loads, swallows the book click command, and makes the intro prompt fully white.')
