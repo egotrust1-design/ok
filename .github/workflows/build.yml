@@ -18,14 +18,20 @@ jobs:
           cache: maven
       - name: Apply stable intro/RTP rewrite
         run: python3 stable_intro_rewrite.py
-      - name: Verify generated source has no legacy intro code
+      - name: Apply retry and rules cleanup
+        run: python3 retry_rules_cleanup.py
+      - name: Verify generated source is clean
         run: |
-          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk|openRules\(Player p\)' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -q '@EventHandler'; then
-            echo 'Legacy/invalid intro handler detected.'
+          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
+            echo 'Legacy intro implementation remains.'
             exit 1
           fi
           if grep -n 'p.spawnParticle' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -v 'Particle.FIREFLY'; then
             echo 'A non-FIREFLY intro particle call remains.'
+            exit 1
+          fi
+          if grep -n '@EventHandler' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -q 'openRules'; then
+            echo 'Invalid openRules event handler remains.'
             exit 1
           fi
       - name: Build
