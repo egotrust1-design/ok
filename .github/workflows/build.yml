@@ -18,16 +18,24 @@ jobs:
           cache: maven
       - name: Apply clean intro v2
         run: python3 clean_intro_v2.py
+      - name: Apply final intro stabilizer
+        run: python3 final_intro_stabilizer.py
       - name: Verify generated source is clean
         run: |
-          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
-            echo 'Legacy intro code remains.'
+          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk|introBookOpen' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
+            echo 'Legacy intro implementation remains.'
             exit 1
           fi
           if grep -n 'p.spawnParticle' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -v 'Particle.FIREFLY'; then
-            echo 'A non-FIREFLY particle call remains.'
+            echo 'A non-FIREFLY intro particle call remains.'
             exit 1
           fi
+          if grep -n 'ClickEvent.runCommand("/hardcore intro")' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -qv 'ENTER THE WORLD'; then
+            echo 'Unexpected intro command click remains.'
+            exit 1
+          fi
+          grep -q 'Type /rules in chat at any time' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
+          grep -q 'TextColor.color(0, 0, 0)' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
           python3 - <<'PY'
           from pathlib import Path
           s = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java').read_text().splitlines()
@@ -38,7 +46,9 @@ jobs:
                   raise SystemExit('Duplicate consecutive @EventHandler annotations remain.')
               if t:
                   prev_event = t.startswith('@EventHandler')
-          print('Clean intro verification passed.')
+          if s.count('public void onIntroAnimation(') != 1 or s.count('public void onIntroLeftClick(') != 1:
+              raise SystemExit('Intro click handlers are not exactly one each.')
+          print('Final intro verification passed.')
           PY
       - name: Build
         run: |
