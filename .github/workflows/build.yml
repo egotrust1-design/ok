@@ -16,24 +16,30 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - name: Apply stable intro/RTP rewrite
-        run: python3 stable_intro_rewrite.py
-      - name: Apply retry and rules cleanup
-        run: python3 retry_rules_cleanup.py
+      - name: Apply clean intro v2
+        run: python3 clean_intro_v2.py
       - name: Verify generated source is clean
         run: |
-          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
-            echo 'Legacy intro implementation remains.'
+          if grep -nE 'PlayerCommandPreprocessEvent|SOUL_FIRE_FLAME|WHITE_ASH|getSpawnPosInChunk|openRules\(Player p\)' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
+            echo 'Legacy intro code remains.'
             exit 1
           fi
           if grep -n 'p.spawnParticle' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -v 'Particle.FIREFLY'; then
-            echo 'A non-FIREFLY intro particle call remains.'
+            echo 'A non-FIREFLY particle call remains.'
             exit 1
           fi
-          if grep -n '@EventHandler' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -q 'openRules'; then
-            echo 'Invalid openRules event handler remains.'
-            exit 1
-          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java').read_text().splitlines()
+          prev_event = False
+          for line in s:
+              t = line.strip()
+              if t.startswith('@EventHandler') and prev_event:
+                  raise SystemExit('Duplicate consecutive @EventHandler annotations remain.')
+              if t:
+                  prev_event = t.startswith('@EventHandler')
+          print('Clean intro verification passed.')
+          PY
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
