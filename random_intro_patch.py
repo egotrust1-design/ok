@@ -66,8 +66,11 @@ def remove_method(src, signature):
     raise SystemExit(f'Unclosed method: {signature}')
 
 
-# The intro no longer needs a sky-drop transition state or recovery path.
+# The intro no longer needs any transition/drop state.
 s = s.replace('    private final Set<UUID> introTransitioning = new HashSet<>();\n', '')
+s = s.replace(' || introTransitioning.contains(id)', '')
+s = s.replace(' && !introTransitioning.contains(id)', '')
+s = s.replace('        introTransitioning.remove(id);\n', '')
 
 # Remove every piece of the old falling/landing sequence.
 s = remove_method(s, '    private void beginWorldDrop(Player p)')
@@ -106,9 +109,8 @@ on_join = '''    @EventHandler(priority = EventPriority.MONITOR)
     }'''
 s = replace_method(s, '    public void onJoin(PlayerJoinEvent e)', on_join)
 
-# Replace the intro particle field entirely. No blue soul-fire particles remain.
-# Firefly is the same particle emitted by the vanilla Firefly Bush, while ASH is
-# the drifting Nether/Soul Sand Valley ash effect.
+# Replace all intro particles. No blue soul-fire remains. FIREFLY is the vanilla
+# Firefly Bush particle and ASH is the drifting Nether/Soul Sand Valley ash.
 particles = '''    private void startIntroParticles(Player p) {
         stopIntroParticles(p.getUniqueId());
         UUID id = p.getUniqueId();
@@ -121,7 +123,7 @@ particles = '''    private void startIntroParticles(Player p) {
                     return;
                 }
                 Location b = p.getLocation();
-                // Dense firefly-bush particles, concentrated around the prompt.
+                // Fireflies clustered around the tutorial prompt.
                 for (int i = 0; i < 18; i++) {
                     double angle = Math.random() * Math.PI * 2.0;
                     double radius = 0.7 + Math.random() * 3.6;
@@ -130,12 +132,15 @@ particles = '''    private void startIntroParticles(Player p) {
                     double y = b.getY() + 0.8 + Math.random() * 4.8;
                     p.spawnParticle(Particle.FIREFLY, x, y, z, 1, 0.0, 0.015, 0.0, 0.0);
                 }
-                // Heavy Nether-style drifting ash filling the surrounding darkness.
-                for (int i = 0; i < 70; i++) {
-                    double x = b.getX() + (Math.random() * 18.0 - 9.0);
-                    double z = b.getZ() + (Math.random() * 18.0 - 9.0);
-                    double y = b.getY() + 1.0 + Math.random() * 14.0;
-                    p.spawnParticle(Particle.ASH, x, y, z, 1, 0.0, -0.035, 0.0, 0.0);
+                // A lot of drifting Nether ash surrounding the scene.
+                for (int i = 70; i < 71; i++) {
+                    // Kept as an explicit loop block so the density is easy to tune.
+                    for (int j = 0; j < 70; j++) {
+                        double x = b.getX() + (Math.random() * 18.0 - 9.0);
+                        double z = b.getZ() + (Math.random() * 18.0 - 9.0);
+                        double y = b.getY() + 1.0 + Math.random() * 14.0;
+                        p.spawnParticle(Particle.ASH, x, y, z, 1, 0.0, -0.035, 0.0, 0.0);
+                    }
                 }
             }
         }.runTaskTimer(this, 0L, 3L);
@@ -143,9 +148,10 @@ particles = '''    private void startIntroParticles(Player p) {
     }'''
 s = replace_method(s, '    private void startIntroParticles(Player p)', particles)
 
-# Vanilla-style safe-position checks. A random X/Z pair is only accepted after
-# scanning nearby columns for a real surface, two-block clearance, and no common
-# spawn hazards. There is intentionally NO fallback to world spawn.
+# Vanilla-style safe random arrival. A random X and random Z are selected
+# independently in [-8000,+8000] around the real world's spawn. For each roll,
+# nearby columns are scanned outward until a safe surface is found. No world-spawn
+# fallback is allowed.
 safe_helpers = '''    private boolean isUnsafeArrivalBlock(org.bukkit.block.Block block) {
         if (block == null) return true;
         org.bukkit.Material m = block.getType();
@@ -176,30 +182,29 @@ safe_helpers = '''    private boolean isUnsafeArrivalBlock(org.bukkit.block.Bloc
     }
 
     private Location findSafeArrivalNear(World world, int centerX, int centerZ) {
-        // Scan outward like vanilla spawn searching: near columns first, then
-        // progressively farther columns. The scan is bounded so a bad biome
-        // cannot trap the server in an enormous synchronous search.
+        // Expand from the random roll so a bad column, lava lake, river, etc.
+        // does not become the player's arrival point.
         for (int radius = 0; radius <= 16; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
-                int[] zs = { -radius, radius };
-                for (int edge = 0; edge < 2; edge++) {
-                    int dz = zs[edge];
-                    if (radius == 0 && edge == 1) continue;
-                    int x = centerX + dx;
-                    int z = centerZ + dz;
-                    int y = world.getHighestBlockYAt(x, z);
-                    if (isSafeArrivalColumn(world, x, y, z)) return new Location(world, x + 0.5, y, z + 0.5);
+                int z1 = centerZ - radius;
+                int z2 = centerZ + radius;
+                int x = centerX + dx;
+                int y1 = world.getHighestBlockYAt(x, z1);
+                if (isSafeArrivalColumn(world, x, y1, z1)) return new Location(world, x + 0.5, y1, z1 + 0.5);
+                if (radius > 0) {
+                    int y2 = world.getHighestBlockYAt(x, z2);
+                    if (isSafeArrivalColumn(world, x, y2, z2)) return new Location(world, x + 0.5, y2, z2 + 0.5);
                 }
             }
             for (int dz = -radius + 1; dz <= radius - 1; dz++) {
-                int[] xs = { -radius, radius };
-                for (int edge = 0; edge < 2; edge++) {
-                    int dx = xs[edge];
-                    int x = centerX + dx;
-                    int z = centerZ + dz;
-                    int y = world.getHighestBlockYAt(x, z);
-                    if (isSafeArrivalColumn(world, x, y, z)) return new Location(world, x + 0.5, y, z + 0.5);
-                }
+                if (radius == 0) break;
+                int x1 = centerX - radius;
+                int x2 = centerX + radius;
+                int z = centerZ + dz;
+                int y1 = world.getHighestBlockYAt(x1, z);
+                if (isSafeArrivalColumn(world, x1, y1, z)) return new Location(world, x1 + 0.5, y1, z + 0.5);
+                int y2 = world.getHighestBlockYAt(x2, z);
+                if (isSafeArrivalColumn(world, x2, y2, z)) return new Location(world, x2 + 0.5, y2, z + 0.5);
             }
         }
         return null;
@@ -222,19 +227,19 @@ safe_helpers = '''    private boolean isUnsafeArrivalBlock(org.bukkit.block.Bloc
     }
 
 '''
-# Remove an earlier generated copy if the patch is rerun, then add one.
-if 'private Location randomIntroArrival(World world)' in s:
-    s = remove_method(s, '    private Location randomIntroArrival(World world)')
-if 'private Location findSafeArrivalNear(World world, int centerX, int centerZ)' in s:
-    s = remove_method(s, '    private Location findSafeArrivalNear(World world, int centerX, int centerZ)')
-if 'private boolean isSafeArrivalColumn(World world, int x, int y, int z)' in s:
-    s = remove_method(s, '    private boolean isSafeArrivalColumn(World world, int x, int y, int z)')
-if 'private boolean isUnsafeArrivalBlock(org.bukkit.block.Block block)' in s:
-    s = remove_method(s, '    private boolean isUnsafeArrivalBlock(org.bukkit.block.Block block)')
+# Remove earlier copies, if present, before inserting exactly one.
+for signature in [
+    '    private Location randomIntroArrival(World world)',
+    '    private Location findSafeArrivalNear(World world, int centerX, int centerZ)',
+    '    private boolean isSafeArrivalColumn(World world, int x, int y, int z)',
+    '    private boolean isUnsafeArrivalBlock(org.bukkit.block.Block block)'
+]:
+    if signature in s:
+        s = remove_method(s, signature)
 s = s.replace('    private void completeIntroduction(Player p)', safe_helpers + '    private void completeIntroduction(Player p)', 1)
 
-# Completion is immediate: cleanup first, then one synchronous teleport to the
-# validated random location. No falling, no animation, no spawn fallback.
+# Completion is immediate: clean up the cinematic, clear every temporary effect,
+# and synchronously teleport once to the validated random location.
 complete = '''    private void completeIntroduction(Player p) {
         UUID id = p.getUniqueId();
         if (!introPlayers.contains(id)) return;
@@ -259,7 +264,7 @@ complete = '''    private void completeIntroduction(Player p) {
             return;
         }
 
-        // End the cinematic completely before the player enters the real world.
+        // End the cutscene completely before the one-time teleport.
         introBookQueued.remove(id);
         removeIntroPrompt(id);
         stopIntroParticles(id);
@@ -273,7 +278,7 @@ complete = '''    private void completeIntroduction(Player p) {
         releaseIntroInstanceSlot(id);
         restoreVisibility(p);
 
-        // Return the player to completely normal server state before teleport.
+        // Return the player to a completely normal server state.
         p.setGameMode(GameMode.SURVIVAL);
         p.setGravity(true);
         p.setAllowFlight(false);
@@ -285,7 +290,7 @@ complete = '''    private void completeIntroduction(Player p) {
         p.setFireTicks(0);
         p.clearActivePotionEffects();
 
-        // One synchronous teleport. Rejoining later does not call this method.
+        // One synchronous teleport. Later joins never call this method.
         p.teleport(arrival);
 
         records.set("players." + id + ".intro-complete", true);
@@ -303,5 +308,11 @@ complete = '''    private void completeIntroduction(Player p) {
     }'''
 s = replace_method(s, '    private void completeIntroduction(Player p)', complete)
 
+# Extra cleanup of legacy drop fields and transition references that may have been
+# injected by the safety patch before this patch runs.
+s = s.replace(' || introTransitioning.contains(id)', '')
+s = s.replace(' && !introTransitioning.contains(id)', '')
+s = s.replace('        introTransitioning.remove(id);\n', '')
+
 P.write_text(s)
-print('Updated intro: synchronous one-time random arrival, vanilla-style safe scan, no spawn fallback, no drop sequence, firefly + heavy ash particles, and full effect cleanup.')
+print('Updated intro: immediate one-time random arrival within +/-8000 X/Z, robust vanilla-style safe scan, no spawn fallback, no falling sequence, fireflies plus heavy Nether ash, and complete effect cleanup.')
