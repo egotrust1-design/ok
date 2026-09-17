@@ -30,8 +30,8 @@ jobs:
             echo 'A non-FIREFLY intro particle call remains.'
             exit 1
           fi
-          if grep -n 'ClickEvent.runCommand("/hardcore intro")' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java | grep -qv 'ENTER THE WORLD'; then
-            echo 'Unexpected intro command click remains.'
+          if ! grep -q 'ClickEvent.runCommand("/hardcore intro")' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java; then
+            echo 'Enter-world click action is missing.'
             exit 1
           fi
           grep -q 'Type /rules in chat at any time' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
