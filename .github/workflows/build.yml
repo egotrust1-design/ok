@@ -16,8 +16,22 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - name: Apply clean intro and RTP fix
+      - name: Apply clean intro and RTP base
         run: python3 last_hardcore_fix.py
+      - name: Apply final clean intro fix
+        run: python3 final_clean_intro_fix.py
+      - name: Sanitize generated source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java')
+          src = path.read_text()
+          src = src.replace('import org.bukkit.event.player.PlayerCommandPreprocessEvent;\n', '')
+          src = src.replace('Particle.WHITE_ASH', 'Particle.DUST')
+          src = src.replace('Particle.SOUL_FIRE_FLAME', 'Particle.DUST')
+          path.write_text(src)
+          print('Generated source sanitized.')
+          PY
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
