@@ -32,6 +32,8 @@ jobs:
           path.write_text(src)
           print('Generated source sanitized.')
           PY
+      - name: Apply ultimate intro cleanup
+        run: python3 ultimate_intro_fix.py
       - name: Build
         run: |
           sed -i 's/,"HardcoreCore",false);/,"HardcoreCore");/' src/main/java/com/egotrust1/hardcorecore/HardcoreCore.java
